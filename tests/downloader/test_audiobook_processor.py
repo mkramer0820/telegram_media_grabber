@@ -107,6 +107,23 @@ def test_extraction_parses_numeric_range_using_start_number() -> None:
     assert info.subtitle is None
 
 
+def test_extraction_parses_trailing_range_with_title_prefix_using_start_number() -> None:
+    # A title prefix before a bundled range, e.g. a book title the uploader
+    # included in the filename — the number is what matters; author/title
+    # metadata always comes from config regardless of this prefix text.
+    info = extract_episode_info("Shadow Slave 1751-1846.m4a")
+    assert info is not None
+    assert info.episode == 1751
+    assert info.subtitle is None
+
+
+def test_extraction_does_not_grab_non_whitespace_separated_trailing_digits() -> None:
+    # "67890" here isn't separated from "12345" by whitespace, so it's not
+    # treated as a trailing episode number (matches the earlier assertion
+    # that this filename is unparsed).
+    assert extract_episode_info("12345_67890.mp3") is None
+
+
 # -- format_title ---------------------------------------------------------
 
 

@@ -135,8 +135,9 @@ async def _run_reprocess(settings: Settings, console: Console) -> None:
         summary = await reprocessor.run(channels, console=console)
 
     console.print(
-        f"[bold]Reprocessed {summary.processed}[/bold] file(s); "
-        f"{summary.skipped} skipped, {summary.errors} error(s)."
+        f"[bold]Reprocessed {summary.processed}[/bold] file(s) "
+        f"({summary.processed_without_record} with no prior state record), "
+        f"{summary.errors} error(s)."
     )
 
 

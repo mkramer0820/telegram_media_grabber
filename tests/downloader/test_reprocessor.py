@@ -69,7 +69,7 @@ async def test_run_reprocesses_stuck_file_with_matching_record(
 
     summary = await reprocessor.run([channel])
 
-    assert summary == ReprocessSummary(processed=1, skipped=0, errors=0)
+    assert summary == ReprocessSummary(processed=1, processed_without_record=0, errors=0)
     assert not stuck_file.exists()  # moved out of staging
 
     new_record_path = dest_root / "Some Author" / "Some Novel" / "Some Novel - Ep 0005.mp3"
@@ -81,25 +81,32 @@ async def test_run_reprocesses_stuck_file_with_matching_record(
     state_store.close()
 
 
-async def test_run_skips_stuck_file_with_no_matching_record(
+async def test_run_processes_stuck_file_with_no_matching_record(
     tmp_path: Path, state_store: StateStore
 ) -> None:
+    # Files grabbed before this app's state tracking existed for them have
+    # no downloaded_files row at all — they must still be tagged/moved the
+    # normal way; only the state-repair step has nothing to correct.
     channel = make_channel(output_subdir="staging")
     staging = tmp_path / "staging"
     staging.mkdir()
-    (staging / "5.mp3").write_bytes(b"\x00" * 256)
+    stuck_file = staging / "5.mp3"
+    stuck_file.write_bytes(b"\x00" * 256)
     # Deliberately no record_downloaded_file call for this path.
 
+    dest_root = tmp_path / "Audiobooks"
     reprocessor = AudiobookReprocessor(
-        state_store=state_store,
-        download_root=tmp_path,
-        audiobooks_dest_dir=tmp_path / "Audiobooks",
+        state_store=state_store, download_root=tmp_path, audiobooks_dest_dir=dest_root
     )
 
     summary = await reprocessor.run([channel])
 
-    assert summary == ReprocessSummary(processed=0, skipped=1, errors=0)
-    assert (staging / "5.mp3").exists()  # left in place, untouched
+    assert summary == ReprocessSummary(processed=0, processed_without_record=1, errors=0)
+    assert not stuck_file.exists()  # moved out of staging like any other file
+    new_path = dest_root / "Some Author" / "Some Novel" / "Some Novel - Ep 0005.mp3"
+    assert new_path.exists()
+    # Nothing to correct — no record existed, and none was invented.
+    assert await state_store.find_downloaded_record_by_path(new_path) is None
     state_store.close()
 
 
@@ -125,7 +132,7 @@ async def test_run_counts_error_and_continues_on_unsupported_extension(
 
     summary = await reprocessor.run([channel])
 
-    assert summary == ReprocessSummary(processed=1, skipped=0, errors=1)
+    assert summary == ReprocessSummary(processed=1, processed_without_record=0, errors=1)
     assert bad_file.exists()  # untouched after the failure
     state_store.close()
 
@@ -153,7 +160,7 @@ async def test_run_infers_sequential_episode_numbers_across_multiple_stuck_files
 
     summary = await reprocessor.run([channel])
 
-    assert summary == ReprocessSummary(processed=2, skipped=0, errors=0)
+    assert summary == ReprocessSummary(processed=2, processed_without_record=0, errors=0)
     book_dir = dest_root / "Some Author" / "Some Novel"
     assert (book_dir / "Some Novel - Ep 0001.mp3").exists()
     assert (book_dir / "Some Novel - Ep 0002.mp3").exists()

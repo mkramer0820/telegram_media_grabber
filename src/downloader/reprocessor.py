@@ -1,16 +1,23 @@
 """Repairs `audiobook_mode` files stuck in staging: `--mode reprocess`.
 
-A file can end up downloaded (recorded in `downloaded_files`) but never
-tagged and relocated out of its staging directory — e.g. it was fetched
-before `audiobook_mode`/`metadata` was configured for that channel, or
-`process_audiobook_file` failed at the time. Because dedup is keyed on
-`(chat_id, message_id)`, such a file is never retried by a normal download
-run once it's marked downloaded, so it sits in staging indefinitely.
+A file can end up downloaded but never tagged and relocated out of its
+staging directory. Two ways that happens:
+  1. It's recorded in `downloaded_files` (downloaded via this app), but
+     post-processing didn't run at the time — e.g. it was fetched before
+     `audiobook_mode`/`metadata` was configured for that channel. Because
+     dedup is keyed on `(chat_id, message_id)`, such a file is never
+     retried by a normal download run once it's marked downloaded.
+  2. It has NO `downloaded_files` record at all — grabbed before this
+     app's state tracking existed for it, or placed in staging by some
+     other means. There's no `(chat_id, message_id)` to correct in that
+     case, but the file still gets tagged and relocated the normal way;
+     only the state-repair step is skipped.
 
-This module finds those files by scanning each `audiobook_mode` channel's
+This module finds stuck files by scanning each `audiobook_mode` channel's
 staging directory directly (a successfully-processed file is moved OUT of
-it — anything still there needs reprocessing, by definition) and re-runs
-tagging/relocation, then corrects the `downloaded_files` row's `file_path`.
+it — anything still there needs reprocessing, by definition), re-runs
+tagging/relocation for all of them, and corrects the `downloaded_files`
+row's `file_path` for the ones that have one.
 
 Fully offline: works entirely from local files and `StateStore`. No
 Telegram connection is made or needed.
@@ -38,7 +45,7 @@ class ReprocessSummary:
     """Outcome of one `AudiobookReprocessor.run` call."""
 
     processed: int
-    skipped: int
+    processed_without_record: int
     errors: int
 
 
@@ -91,14 +98,16 @@ class AudiobookReprocessor:
             console: Optional `rich` console for a one-line-per-file report.
 
         Returns:
-            A summary of how many files were processed, skipped (no
-            matching `downloaded_files` record found), or errored.
+            A summary of how many files were processed (with their state
+            record corrected), processed without a record (tagged/moved,
+            but nothing to correct — see module docstring case 2), or
+            errored.
         """
-        processed = skipped = errors = 0
+        processed = processed_without_record = errors = 0
         for channel in channels:
             for file_path in find_stuck_files(self._download_root, channel):
                 try:
-                    new_path = await self._reprocess_one(channel, file_path)
+                    new_path, had_record = await self._reprocess_one(channel, file_path)
                 except Exception as exc:  # noqa: BLE001 - boundary: report & continue
                     logger.exception("Failed to reprocess %s", file_path)
                     if console is not None:
@@ -106,42 +115,50 @@ class AudiobookReprocessor:
                     errors += 1
                     continue
 
-                if new_path is None:
-                    skipped += 1
-                    if console is not None:
-                        console.print(
-                            f"[yellow]Skipped[/yellow] {file_path.name} "
-                            "(no matching downloaded_files record)"
-                        )
-                else:
+                if had_record:
                     processed += 1
                     if console is not None:
                         console.print(f"[green]Reprocessed[/green] {file_path.name} -> {new_path.name}")
+                else:
+                    processed_without_record += 1
+                    if console is not None:
+                        console.print(
+                            f"[green]Reprocessed[/green] {file_path.name} -> {new_path.name} "
+                            "[yellow](no downloaded_files record — state not updated)[/yellow]"
+                        )
 
-        return ReprocessSummary(processed=processed, skipped=skipped, errors=errors)
+        return ReprocessSummary(
+            processed=processed, processed_without_record=processed_without_record, errors=errors
+        )
 
-    async def _reprocess_one(self, channel: ChannelConfig, file_path: Path) -> Path | None:
-        """Tag, move, and correct state for one stuck file.
+    async def _reprocess_one(self, channel: ChannelConfig, file_path: Path) -> tuple[Path, bool]:
+        """Tag and move one stuck file, correcting its state record if one exists.
 
         Args:
             channel: The file's owning channel (must have `metadata` set).
             file_path: Current on-disk location, still in staging.
 
         Returns:
-            The file's new path if reprocessed, or `None` if no
-            `downloaded_files` record matches `file_path` — left in place
-            rather than guessed at.
+            `(new_path, had_record)` — `new_path` is always set; `had_record`
+            is `True` if a matching `downloaded_files` row was found and
+            corrected, `False` if the file was tagged/moved anyway but had
+            no state to repair (see module docstring case 2).
         """
         assert channel.metadata is not None, "caller must filter to metadata-having channels"
 
         record = await self._state_store.find_downloaded_record_by_path(file_path)
-        if record is None:
-            return None
-        chat_id, message_id = record
+        message_id = record[1] if record is not None else None
 
         new_path = await process_audiobook_file(
             file_path, message_id, channel.metadata, self._audiobooks_dest_dir
         )
+
+        if record is None:
+            return new_path, False
+
+        chat_id, record_message_id = record
         content_hash = await asyncio.to_thread(hash_file, new_path)
-        await self._state_store.update_downloaded_file_path(chat_id, message_id, new_path, content_hash)
-        return new_path
+        await self._state_store.update_downloaded_file_path(
+            chat_id, record_message_id, new_path, content_hash
+        )
+        return new_path, True
