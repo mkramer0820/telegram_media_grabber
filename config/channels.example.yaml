@@ -1,0 +1,77 @@
+# Reference examples for config/channels.yaml, one per common use case.
+# This file is not read by the application — copy the entries you need into
+# your real config/channels.yaml. See src/config/settings.py (ChannelConfig)
+# for the authoritative schema; this file is kept in sync with it by hand.
+
+# --- Top-level settings (apply to every channel below) ---------------------
+download_root: downloads          # base dir for non-audiobook output_subdirs
+max_concurrent_downloads: 5       # 1-50; shared semaphore across ALL channels
+
+channels:
+
+  # --- Use case 1: "grab everything" archive channel -----------------------
+  # No media_types filter needed if you want photos + videos + documents
+  # (that's the default when media_types is omitted). Good for a general
+  # channel dump with no post-processing.
+  - id: "@some_public_channel"        # numeric chat ID also works, e.g. -1001234567890
+    name: general_dump                 # label used in logs / the dashboard
+    output_subdir: general_dump        # -> downloads/general_dump/
+
+  # --- Use case 2: documents-only archive (PDFs, ebooks, zips) -------------
+  # Restrict media_types so photos/videos in the same chat are skipped.
+  - id: -1001234567890
+    name: docs_archive
+    media_types: [document]
+    output_subdir: docs_archive        # -> downloads/docs_archive/
+
+  # --- Use case 3: audio channel WITHOUT audiobook post-processing ---------
+  # Just want the raw audio files with their original names, no ID3
+  # tagging/renaming/relocation? Leave audiobook_mode off (or omit it).
+  - id: "@some_music_or_podcast_channel"
+    name: podcast_raw
+    media_types: [audio, document]     # covers both Telegram "audio" and
+    output_subdir: podcast_raw         # file-attachment-style audio uploads
+
+  # --- Use case 4: audiobook channel WITH tagging + Plex-style layout ------
+  # audiobook_mode:true requires the metadata block (author + novel_title) —
+  # config loading fails fast if it's missing. output_subdir is just the
+  # local staging folder chapters land in before being tagged and moved to
+  # AUDIOBOOKS_DEST_DIR/{author}/{novel_title}/ (set in .env).
+  - id: "shadowslavexfm77"
+    name: shadow_slave_audiobook
+    media_types: [audio, document]
+    output_subdir: shadow_slave_staging
+    audiobook_mode: true
+    metadata:
+      author: "Guiltythree"
+      novel_title: "Shadow Slave"
+
+  # --- Use case 5: a second audiobook, same Plex root -----------------------
+  # Every audiobook_mode channel shares the one AUDIOBOOKS_DEST_DIR root
+  # from .env; each book gets sorted into its own author/title subfolder
+  # automatically, so multiple channels/books can point at the same root.
+  - id: -1009876543210
+    name: another_audiobook
+    media_types: [audio, document]
+    output_subdir: another_audiobook_staging
+    audiobook_mode: true
+    metadata:
+      author: "Some Other Author"
+      novel_title: "Some Other Novel"
+
+# --- Field reference ---------------------------------------------------
+# id             (required)  Telegram chat ID (int) or "@username" (str).
+# name           (required)  Human-readable label for logs/the dashboard.
+# output_subdir  (required)  Subfolder under download_root files land in
+#                             first. For audiobook_mode channels this is
+#                             just staging — files are moved out of it.
+# media_types    (optional)  Subset of [photo, video, document, audio].
+#                             Defaults to [photo, video, document].
+# audiobook_mode (optional)  Default false. Enables tag+move post-processing
+#                             (src/downloader/audiobook_processor.py).
+# metadata       (optional*) *Required when audiobook_mode: true.
+#                             author -> ID3 Artist/AlbumArtist.
+#                             novel_title -> ID3 Album + destination folder.
+#
+# NOTE: `min_date` is accepted by the schema but is not yet enforced by the
+# downloader (no messages are filtered by date today) — don't rely on it.

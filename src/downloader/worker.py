@@ -27,6 +27,7 @@ import asyncio
 import logging
 import random
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Awaitable, Protocol
 
@@ -35,6 +36,7 @@ from telethon.errors import FloodWaitError
 from telethon.tl.custom.message import Message
 
 from src.config.settings import ChannelConfig, MediaType
+from src.core.client import resolve_entity
 from src.downloader.audiobook_processor import process_audiobook_file
 from src.downloader.dedup import hash_file
 from src.downloader.filenames import dedup_suffixed_path, sanitize_filename
@@ -135,6 +137,24 @@ def _matches_media_types(message: Message, wanted: list[MediaType]) -> bool:
     return False
 
 
+def _parse_min_date(min_date: str | None) -> datetime | None:
+    """Parse a `ChannelConfig.min_date` ISO-8601 date string.
+
+    Args:
+        min_date: An ISO-8601 date string (e.g. "2026-07-24"), or None.
+
+    Returns:
+        A UTC-aware `datetime` at midnight of that date, or `None` if
+        `min_date` is `None`.
+
+    Raises:
+        ValueError: If `min_date` is set but not a valid ISO-8601 date.
+    """
+    if min_date is None:
+        return None
+    return datetime.fromisoformat(min_date).replace(tzinfo=timezone.utc)
+
+
 def _derive_filename(message: Message) -> str:
     """Best-effort filename for a message's media, before sanitization."""
     if message.document is not None:
@@ -192,9 +212,10 @@ class DownloadManager:
         Args:
             channel: The channel/chat configuration to process.
         """
-        entity = await self._client.get_entity(channel.id)
+        entity = await resolve_entity(self._client, channel.id)
         chat_id = int(entity.id)
         last_message_id = await self._state_store.get_last_message_id(chat_id) or 0
+        min_date = _parse_min_date(channel.min_date)
 
         output_dir = self._download_root / channel.output_subdir
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -204,7 +225,15 @@ class DownloadManager:
         tasks: list[Awaitable[None]] = []
         highest_seen = last_message_id
 
+        # Telethon's default iteration order (no `reverse=True`) is newest
+        # message first, i.e. message.date is monotonically non-increasing
+        # as we iterate. So once we hit one message older than min_date,
+        # every subsequent message is guaranteed older too — safe to stop
+        # scanning rather than filtering the rest of the channel's history.
         async for message in self._client.iter_messages(entity, min_id=last_message_id):
+            if min_date is not None and message.date < min_date:
+                break
+
             scanned += 1
             highest_seen = max(highest_seen, message.id)
 

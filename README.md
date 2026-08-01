@@ -79,10 +79,9 @@ channels:
     name: private_chat_export
     media_types: [document]
     output_subdir: docs
-    min_date: "2024-01-01"
   - id: -1001987654321
     name: shadow_slave_audiobook
-    media_types: [document]
+    media_types: [audio, document]
     output_subdir: shadow_slave_staging
     audiobook_mode: true
     metadata:
@@ -90,10 +89,19 @@ channels:
       novel_title: "Shadow Slave"
 ```
 
+See `config/channels.example.yaml` for a fuller, annotated set of examples
+covering each common use case (plain archive, documents-only, raw audio
+with no post-processing, single and multi-book `audiobook_mode`) plus a
+field-by-field reference.
+
 Settings are loaded and validated by `src/config/settings.py` using
 `pydantic-settings`: `.env` supplies secrets/runtime knobs, the YAML file
 supplies the channel list, and both are merged into one immutable `Settings`
 object at startup.
+
+> **Known gap:** `ChannelConfig` also accepts an optional `min_date` field,
+> but the downloader doesn't enforce it yet — no messages are currently
+> filtered by date. Don't rely on it until this is implemented.
 
 **`audiobook_mode` channels** are post-processed by
 `src/downloader/audiobook_processor.py` immediately after each chapter's

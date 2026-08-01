@@ -9,11 +9,15 @@ subsequent run connects without prompting for a login code.
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
+from typing import Any
 
 from rich.console import Console
 from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError
+from telethon.tl.functions.messages import CheckChatInviteRequest
+from telethon.tl.types import ChatInviteAlready, ChatInvitePeek
 
 from src.config.settings import Settings
 from src.core.exceptions import AuthenticationError
@@ -36,6 +40,10 @@ _DEVICE_MODEL = "Desktop"
 _SYSTEM_VERSION = "Windows 11"
 _APP_VERSION = "4.16.8 x64"
 _LANG_CODE = "en"
+
+# Matches "t.me/+<hash>" and the older "t.me/joinchat/<hash>" private
+# invite link formats, with or without a scheme.
+_INVITE_LINK_PATTERN = re.compile(r"t\.me/(?:\+|joinchat/)(?P<hash>[A-Za-z0-9_-]+)")
 
 
 def build_client(settings: Settings) -> TelegramClient:
@@ -87,6 +95,51 @@ def build_client(settings: Settings) -> TelegramClient:
         lang_code=_LANG_CODE,
     )
     return client
+
+
+async def resolve_entity(client: TelegramClient, chat_id: int | str) -> Any:
+    """Resolve a channel identifier, including private invite links.
+
+    `TelegramClient.get_entity` handles numeric chat IDs and "@username"
+    strings directly, but it cannot resolve a private-channel invite link
+    (`https://t.me/+<hash>` or the older `t.me/joinchat/<hash>` form) —
+    those aren't a username or ID, just an opaque invite token. For those,
+    this checks the invite via `CheckChatInviteRequest` and returns the
+    underlying chat if the account has already joined.
+
+    This function deliberately never joins a channel on the caller's
+    behalf: joining is an account action visible to other members, so it
+    must be a decision the user makes explicitly (e.g. via the Telegram
+    app), not something a config entry silently triggers.
+
+    Args:
+        client: A connected, authenticated `TelegramClient`.
+        chat_id: A numeric chat ID, "@username", or an invite link/hash.
+
+    Returns:
+        The resolved chat/channel entity (same shape `get_entity` returns).
+
+    Raises:
+        AuthenticationError: If `chat_id` is a valid invite link but this
+            account has not joined that channel.
+    """
+    if not isinstance(chat_id, str):
+        return await client.get_entity(chat_id)
+
+    match = _INVITE_LINK_PATTERN.search(chat_id)
+    if match is None:
+        return await client.get_entity(chat_id)
+
+    invite_hash = match.group("hash")
+    result = await client(CheckChatInviteRequest(invite_hash))
+    if isinstance(result, (ChatInviteAlready, ChatInvitePeek)):
+        return result.chat
+
+    raise AuthenticationError(
+        f"Invite link '{chat_id}' is valid but this account has not joined "
+        "that channel yet. Join it from the Telegram app first — this app "
+        "never auto-joins channels on your behalf."
+    )
 
 
 async def connect_and_authenticate(client: TelegramClient, settings: Settings, console: Console) -> None:

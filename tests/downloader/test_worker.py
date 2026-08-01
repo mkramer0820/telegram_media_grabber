@@ -8,6 +8,7 @@ test here, not Telethon itself).
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import AsyncIterator
 
@@ -53,6 +54,7 @@ class FakeMessage:
         photo: object | None = None,
         content: bytes = b"fake media bytes",
         side_effects: list[Exception] | None = None,
+        date: datetime | None = None,
     ) -> None:
         self.id = message_id
         self.chat_id = chat_id
@@ -60,6 +62,7 @@ class FakeMessage:
         self.photo = photo
         self.video = None
         self.audio = None
+        self.date = date or datetime.now(timezone.utc)
         self._content = content
         self._side_effects = list(side_effects or [])
         self.download_attempts = 0
@@ -322,6 +325,63 @@ async def test_process_channel_skips_already_downloaded_and_updates_last_id(
     assert await state_store.get_last_message_id(99) == 3
     downloaded_names = {p[2].name for p in reporter.completed}
     assert downloaded_names == {"two.mp4", "99_3"}
+
+
+async def test_process_channel_stops_at_min_date_cutoff(
+    tmp_path: Path, state_store: StateStore
+) -> None:
+    now = datetime.now(timezone.utc)
+    # Newest-first order, matching Telethon's default iteration order.
+    messages = [
+        FakeMessage(3, 77, document=FakeDocument("newest.mp3"), date=now - timedelta(days=1)),
+        FakeMessage(2, 77, document=FakeDocument("middle.mp3"), date=now - timedelta(days=3)),
+        FakeMessage(1, 77, document=FakeDocument("oldest.mp3"), date=now - timedelta(days=10)),
+    ]
+    client = FakeClient(entity_id=77, messages=messages)
+    reporter = RecordingReporter()
+    manager = DownloadManager(
+        client=client,
+        state_store=state_store,
+        download_root=tmp_path,
+        max_concurrent_downloads=3,
+        reporter=reporter,
+    )
+    cutoff = (now - timedelta(days=5)).date().isoformat()
+    channel = make_channel("chan", min_date=cutoff)
+
+    await manager._process_channel(channel)
+
+    downloaded_names = {p[2].name for p in reporter.completed}
+    assert downloaded_names == {"newest.mp3", "middle.mp3"}
+    assert "oldest.mp3" not in downloaded_names
+    # last_message_id reflects only messages actually scanned before the
+    # date-cutoff break, not the oldest message in the channel.
+    assert await state_store.get_last_message_id(77) == 3
+
+
+async def test_process_channel_with_no_min_date_downloads_everything(
+    tmp_path: Path, state_store: StateStore
+) -> None:
+    now = datetime.now(timezone.utc)
+    messages = [
+        FakeMessage(2, 88, document=FakeDocument("recent.mp3"), date=now - timedelta(days=1)),
+        FakeMessage(1, 88, document=FakeDocument("ancient.mp3"), date=now - timedelta(days=3650)),
+    ]
+    client = FakeClient(entity_id=88, messages=messages)
+    reporter = RecordingReporter()
+    manager = DownloadManager(
+        client=client,
+        state_store=state_store,
+        download_root=tmp_path,
+        max_concurrent_downloads=3,
+        reporter=reporter,
+    )
+    channel = make_channel("chan")  # min_date defaults to None
+
+    await manager._process_channel(channel)
+
+    downloaded_names = {p[2].name for p in reporter.completed}
+    assert downloaded_names == {"recent.mp3", "ancient.mp3"}
 
 
 async def test_flood_wait_sleeps_exact_server_duration_plus_fixed_buffer(

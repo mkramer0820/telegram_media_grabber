@@ -7,7 +7,14 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from src.config.settings import ChannelsFile, MediaType, Settings, load_channels_file
+from src.config.settings import (
+    AudiobookMetadata,
+    ChannelConfig,
+    ChannelsFile,
+    MediaType,
+    Settings,
+    load_channels_file,
+)
 
 
 VALID_YAML = """
@@ -81,6 +88,37 @@ def test_channel_config_defaults_media_types_when_omitted() -> None:
         MediaType.VIDEO,
         MediaType.DOCUMENT,
     ]
+
+
+def test_channel_config_rejects_unknown_field_typo() -> None:
+    """A misspelled field (e.g. audio_book_mode instead of audiobook_mode)
+    must fail loudly at config-load time, not silently no-op — this is the
+    exact typo that previously left audiobook_mode=False with no error.
+    """
+    with pytest.raises(ValidationError):
+        ChannelConfig.model_validate(
+            {
+                "id": "@x",
+                "name": "x",
+                "output_subdir": "x",
+                "audio_book_mode": True,
+            }
+        )
+
+
+def test_audiobook_metadata_rejects_misplaced_min_date() -> None:
+    """min_date belongs on ChannelConfig, not nested inside metadata —
+    a misplaced key there must also fail loudly.
+    """
+    with pytest.raises(ValidationError):
+        AudiobookMetadata.model_validate(
+            {"author": "A", "novel_title": "B", "min_date": "2026-07-24"}
+        )
+
+
+def test_channels_file_rejects_unknown_top_level_field() -> None:
+    with pytest.raises(ValidationError):
+        ChannelsFile.model_validate({"donwload_root": "downloads"})  # typo'd key
 
 
 def test_settings_rejects_non_positive_api_id(monkeypatch: pytest.MonkeyPatch) -> None:

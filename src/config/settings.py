@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -32,12 +32,23 @@ class AudiobookMetadata(BaseModel):
     tags and to build the `{author}/{novel_title}/...` destination layout.
     """
 
+    # extra="forbid": a typo'd or misplaced key (e.g. `min_date` nested
+    # here instead of on the channel itself) must fail config loading
+    # loudly, not silently no-op — see ChannelConfig for the same rule.
+    model_config = ConfigDict(extra="forbid")
+
     author: str = Field(..., description="Tagged as Artist/AlbumArtist.")
     novel_title: str = Field(..., description="Tagged as Album; also the destination folder.")
 
 
 class ChannelConfig(BaseModel):
     """A single download target declared in `config/channels.yaml`."""
+
+    # extra="forbid": Pydantic's default is to silently ignore unknown
+    # keys, which turns a config typo (e.g. `audio_book_mode` instead of
+    # `audiobook_mode`) into a feature that quietly never runs. Fail fast
+    # at config-load time instead.
+    model_config = ConfigDict(extra="forbid")
 
     id: int | str = Field(..., description="Telegram chat ID or @username.")
     name: str = Field(..., description="Human-readable label used in logs/UI.")
@@ -69,6 +80,8 @@ class ChannelConfig(BaseModel):
 
 class ChannelsFile(BaseModel):
     """Schema of the top-level `config/channels.yaml` document."""
+
+    model_config = ConfigDict(extra="forbid")
 
     download_root: Path = Field(default=Path("downloads"))
     max_concurrent_downloads: int = Field(default=5, ge=1, le=50)
