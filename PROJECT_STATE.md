@@ -46,8 +46,10 @@ Implemented and working (all covered by `mypy --strict` + pytest):
   a fast filename+size+first-1MiB-hash key, scoped per target chat.
 - Docker: `Dockerfile`, `docker-compose.yml`, `.dockerignore`.
 - Audiobook episode-number extraction from the raw filename itself — a
-  trailing bare number or range, either the whole stem or preceded by
-  whitespace (e.g. "1114", "5-6", or "Shadow Slave 1751-1846" — a range
+  cleanly-delimited bare number or range anywhere in the filename
+  (leading, trailing, or the whole stem — e.g. "1114", "5-6",
+  "Shadow Slave 1751-1846" (trailing range), or
+  "0001_0100_Weakest_Beast_Tamer" (leading range, "_" separator); a range
   uses its start number) — never from Telegram's message ID. If the
   filename has no number at all, `infer_next_episode_number` (highest
   existing "Ep n" in the destination directory + 1) is the fallback;
@@ -218,12 +220,15 @@ porting it.
 - **Audiobook episode extraction** (`downloader/audiobook_processor.py::extract_episode_info`):
   tries "Ep <n> - <subtitle>" first (with a specific "trailing uploader
   tag" peel-off rule — see the two regex comments, the space-before-hyphen
-  distinction is load-bearing, don't simplify it away), then a trailing
-  bare number/range that's either the whole filename stem or preceded by
-  whitespace (e.g. "1114", "5-6", or "Shadow Slave 1751-1846" — a title
-  prefix before a bundled range — using the range's start). A
-  non-whitespace-joined digit run (e.g. "12345_67890") deliberately does
-  NOT count as a trailing number. Returns `None`, not a guess, when
+  distinction is load-bearing, don't simplify it away), then a
+  cleanly-delimited bare number/range *anywhere* in the filename stem —
+  leading, trailing, or the whole stem (e.g. "1114", "5-6",
+  "Shadow Slave 1751-1846" — trailing range with a title prefix — or
+  "0001_0100_Weakest_Beast_Tamer" — leading range with a title suffix,
+  "_" as the separator — using the range's start). "Cleanly-delimited"
+  means bounded by the stem's edges or a whitespace/underscore/hyphen/dot
+  separator on each side — a digit run merely adjacent to other text
+  without such a boundary doesn't count. Returns `None`, not a guess, when
   nothing matches — `process_audiobook_file` only then falls back to
   `infer_next_episode_number` (highest existing "Ep n" in the destination
   dir + 1). The Telegram message ID is *never* used as an episode number —
@@ -298,7 +303,7 @@ typing** for Telethon objects rather than a mocking framework or live
 network calls (`FakeClient`, `FakeMessage`, `FakeDocumentAttribute`, etc. —
 see `tests/downloader/test_worker.py` for the fullest example). Real
 `StateStore` instances against `tmp_path` SQLite files, not mocked. This
-kept the whole suite at ~2-3 seconds for 148 tests with zero flakiness from
+kept the whole suite at ~2-3 seconds for 149 tests with zero flakiness from
 mocking mismatches. A C# port should use the equivalent (hand-written test
 doubles implementing the same interfaces, or `WTelegramClient`'s own
 test-friendly seams if it has them) over a heavy mocking framework, for the

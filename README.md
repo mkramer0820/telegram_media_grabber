@@ -122,10 +122,12 @@ newest-first, and scanning stops for a channel once a message older than
 **`audiobook_mode` channels** are post-processed by
 `src/downloader/audiobook_processor.py` immediately after each chapter's
 atomic download completes: the episode number and subtitle are parsed from
-the filename — either "Ep &lt;n&gt; - &lt;subtitle&gt;", or a trailing bare number/range
-like "1114", "5-6", or "Shadow Slave 1751-1846" (a title prefix before a
-bundled range; a range uses its start number) — never from the Telegram
-message ID. If the filename has no parsable number at all, the next
+the filename — either "Ep &lt;n&gt; - &lt;subtitle&gt;", or a cleanly-delimited bare
+number/range anywhere in the filename (leading, trailing, or the whole
+stem) like "1114", "5-6", "Shadow Slave 1751-1846" (trailing range), or
+"0001_0100_Weakest_Beast_Tamer" (leading range, "_" separator; a range
+uses its start number) — never from the Telegram message ID. If the
+filename has no parsable number at all, the next
 episode number is inferred from the highest "Ep n" already in the
 destination directory, plus one. ID3/MP4 tags
 (Artist, Album, Title, Track) are embedded via `mutagen`, and the file is

@@ -58,14 +58,17 @@ _EPISODE_PATTERN = re.compile(
 _TRAILING_UPLOADER_TAG_PATTERN = re.compile(r"^(?P<subtitle>.+?)-[A-Za-z0-9]+$")
 
 # Some channels post chapters named as just a number, or a number range for
-# a bundled multi-chapter file, e.g. "1114.m4a", "1114..m4a" (a trailing dot
-# survives in Path(...).stem when the raw filename itself has a double dot),
-# "5-6.m4a", or "Shadow Slave 1751-1846.m4a" (a title prefix followed by a
-# bundled range). The number/range must be the whole stem OR preceded by
-# whitespace, and nothing but optional trailing dots may follow it — so a
-# non-whitespace-separated digit run (e.g. "12345_67890") still counts as
-# unparsed, rather than grabbing an arbitrary trailing number out of it.
-_TRAILING_NUMERIC_PATTERN = re.compile(r"(?:^|\s)(?P<start>\d+)(?:-(?P<end>\d+))?\.*$")
+# a bundled multi-chapter file — and that number/range can sit anywhere in
+# the filename, not only at the end: "1114.m4a", "1114..m4a" (a trailing
+# dot survives in Path(...).stem when the raw filename itself has a double
+# dot), "5-6.m4a", "Shadow Slave 1751-1846.m4a" (title prefix, trailing
+# range), or "0001_0100_Weakest_Beast_Tamer.mp3" (leading range, title
+# suffix — "_" as the range separator here, not "-"). The number/range
+# must be cleanly delimited — bounded by the start/end of the stem or a
+# whitespace/underscore/hyphen/dot separator on each side — so a token
+# that's merely adjacent to other non-digit text without a separator
+# doesn't get misread as a number.
+_NUMBER_TOKEN_PATTERN = re.compile(r"(?:^|[\s_-])(?P<start>\d+)(?:[-_](?P<end>\d+))?(?=$|[\s_.-])")
 
 # Scans an already-tagged destination filename (e.g. "Shadow Slave - Ep 0009
 # - Title.mp3") for its episode number, used only by
@@ -87,11 +90,12 @@ def extract_episode_info(raw_filename: str) -> EpisodeInfo | None:
     Tries two patterns, in order:
       1. "Ep <n> - <subtitle>" (or "Episode"/"ep."/colon separator) anywhere
          in the filename stem.
-      2. A trailing bare number or number range — either the whole stem or
-         preceded by whitespace, e.g. "1114", "5-6", or
-         "Shadow Slave 1751-1846" (a title prefix + bundled range). A range
-         uses its start number. Author/novel_title always come from config
-         regardless of what prefix text (if any) precedes the number here.
+      2. A cleanly-delimited bare number or number range anywhere in the
+         stem — leading, trailing, or the whole stem — e.g. "1114", "5-6",
+         "Shadow Slave 1751-1846" (trailing range), or
+         "0001_0100_Weakest_Beast_Tamer" (leading range). A range uses its
+         start number. Author/novel_title always come from config
+         regardless of what other text surrounds the number here.
 
     Args:
         raw_filename: The original filename (with or without extension),
@@ -113,7 +117,7 @@ def extract_episode_info(raw_filename: str) -> EpisodeInfo | None:
         subtitle = tag_match.group("subtitle").strip() if tag_match else rest
         return EpisodeInfo(episode=episode, subtitle=subtitle or None)
 
-    numeric_match = _TRAILING_NUMERIC_PATTERN.search(stem)
+    numeric_match = _NUMBER_TOKEN_PATTERN.search(stem)
     if numeric_match is not None:
         return EpisodeInfo(episode=int(numeric_match.group("start")), subtitle=None)
 

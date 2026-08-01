@@ -62,9 +62,7 @@ def test_extraction_handles_colon_separator() -> None:
 
 def test_extraction_returns_none_when_no_pattern_matches() -> None:
     assert extract_episode_info("random_upload_name.mp3") is None
-    # Contains digits, but not as the *entire* stem, so it doesn't count as
-    # a bare episode number either.
-    assert extract_episode_info("12345_67890.mp3") is None
+    assert extract_episode_info("nonumbershere.mp3") is None
 
 
 def test_extraction_preserves_subtitle_with_space_separated_trailing_number() -> None:
@@ -117,11 +115,20 @@ def test_extraction_parses_trailing_range_with_title_prefix_using_start_number()
     assert info.subtitle is None
 
 
-def test_extraction_does_not_grab_non_whitespace_separated_trailing_digits() -> None:
-    # "67890" here isn't separated from "12345" by whitespace, so it's not
-    # treated as a trailing episode number (matches the earlier assertion
-    # that this filename is unparsed).
-    assert extract_episode_info("12345_67890.mp3") is None
+def test_extraction_parses_leading_range_with_title_suffix_using_start_number() -> None:
+    # A leading range before a title suffix, using "_" as the range
+    # separator, e.g. "0001_0100_Weakest_Beast_Tamer.mp3" (chapters 1-100).
+    info = extract_episode_info("0001_0100_Weakest_Beast_Tamer.mp3")
+    assert info is not None
+    assert info.episode == 1
+    assert info.subtitle is None
+
+
+def test_extraction_parses_underscore_separated_range() -> None:
+    # "_" and "-" are both accepted as the range separator.
+    info = extract_episode_info("0201_0300_Weakest_Beast_Tamer.mp3")
+    assert info is not None
+    assert info.episode == 201
 
 
 # -- format_title ---------------------------------------------------------
@@ -327,7 +334,7 @@ async def test_process_audiobook_file_infers_episode_one_when_untitled_and_dest_
 ) -> None:
     staging_dir = tmp_path / "staging"
     staging_dir.mkdir()
-    source = staging_dir / "12345_67890.mp3"  # no parsable episode number
+    source = staging_dir / "totally_untitled_file.mp3"  # no parsable episode number
     _write_dummy_mp3(source)
 
     metadata = AudiobookMetadata(author="Some Author", novel_title="Untitled Series")
