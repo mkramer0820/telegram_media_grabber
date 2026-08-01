@@ -139,10 +139,14 @@ Dependency direction (enforced, checked by review — see `CLAUDE.md`):
 `Protocol` callback interfaces (`ProgressReporter`,
 `UploadProgressReporter`), not direct imports.
 
-Rough size (as of last count): ~2,900 lines across `src/`. Largest files:
-`downloader/worker.py` (391) and `downloader/audiobook_processor.py` (379),
-both close to the project's own 400-line split threshold by design (the
-most state-machine-heavy modules).
+Rough size (as of last count): ~3,000 lines across `src/`. Largest files:
+`downloader/audiobook_processor.py` (429) and `downloader/worker.py` (391).
+**`audiobook_processor.py` now exceeds the project's own ~400-line
+CLAUDE.md split threshold** — it grew organically through several rounds
+of real-world bug fixes (see §10) rather than being designed up front.
+It's still one file in the Python codebase (not yet split — that cleanup
+hasn't been done), but a from-scratch C# design should NOT reproduce this
+shape; see §10 for the recommended split.
 
 ## 4. Data model (SQLite, `data/state.db`)
 
@@ -366,7 +370,115 @@ not after — the Python test suite is effectively the spec for edge cases
 (empty directories, FloodWait exhaustion, collision suffixing, etc.) that
 are easy to forget when reading only the implementation.
 
-## 10. Things to explicitly re-verify before porting (don't trust this doc)
+## 10. Lessons learned this session — recommended C# design improvements
+
+The audiobook episode-numbering logic didn't arrive at its current shape
+by design — it got there through several rounds of real production bugs
+found by actually running the tool against a real library. That history
+is worth preserving as *design input* for the C# port, so the rewrite
+starts from the end state instead of re-discovering the same lessons the
+hard way. None of this has been refactored into the Python codebase
+(scope was kept to fixing the live bugs, not restructuring working code)
+— treat this section as "build it this way from scratch," not "the
+Python code already looks like this."
+
+**What went wrong, in order, and why it matters:**
+1. Episode numbering originally fell back to the Telegram message ID when
+   a filename had no "Ep n" pattern. Message IDs are an arbitrary,
+   chat-wide counter — completely unrelated to a show's chapter count.
+   This silently mistagged ~30 real files before it was caught, because
+   nothing distinguished "confidently parsed" from "desperately guessed."
+2. The fix (parse a bare number from the filename) was first written to
+   only look at the *trailing* position. Real files had the number
+   *leading* instead (`0001_0100_Title.mp3`) — missed entirely, silently
+   fell through to an even-worse fallback ("guess the next sequential
+   number"), producing plausible-looking but wrong numbers.
+3. A further fix generalized the number search to scan the whole
+   filename — but then a *volume* file (`Title Volume 10 Subtitle.m4a`,
+   a whole book bundling many chapters) got matched by the generic
+   number-in-filename rule and tagged as chapter `Ep 10`, silently
+   colliding in meaning (not just filename) with the real chapter 10.
+4. Recovering from step 1 and step 3's mistakes required manually
+   reconstructing the correct numbers from external evidence (the
+   original filenames, still visible in a terminal scrollback) — there
+   was no built-in way to preview what a bulk re-tag operation *would*
+   do before it did it.
+
+**Concrete recommendations for the C# domain model:**
+
+- **Separate "source identity" from "domain numbering" as distinct
+  types, structurally.** e.g. a `MessageReference` (chat ID + message ID,
+  provenance/logging only) and a `ChapterNumber`/`VolumeNumber` value
+  type that can *only* be constructed from a successful filename parse or
+  an explicit inference step — never from a `MessageReference`. If the
+  compiler won't let you pass a message ID where a chapter number is
+  expected, bug #1 becomes structurally impossible instead of a runtime
+  footgun.
+- **Model content-unit kind as a real type**, e.g.
+  `enum ContentUnitKind { Chapter, Volume }` on day one, not a string
+  label bolted on after the fact (`EpisodeInfo.label` in the Python code
+  is exactly that retrofit — functional, but a smell). Each kind should
+  own its own number space, padding width, and destination-naming rule as
+  data on the enum case (or a small strategy object per kind), so adding
+  a third kind later (e.g. "Side Story") doesn't require touching
+  unrelated code paths.
+- **Filename parsing as an ordered chain of small, independently
+  testable strategies**, not one growing function with sequential
+  if/elif fallbacks (`extract_episode_info` in Python is currently this;
+  it works, but every new real-world filename shape meant editing the
+  same function and re-reasoning about interaction with every earlier
+  branch). In C#: an ordered list of `IFilenameParser` implementations
+  (`ChapterPatternParser`, `VolumePatternParser`, `BareNumberParser`,
+  ...), each takes a filename and returns a `ParseResult?`. Adding a new
+  shape means adding a new class to the list, not editing an existing
+  one. Order matters (most specific first) — make that order an explicit,
+  documented, tested property of the list itself.
+- **Make every parse result carry *why*, not just *what*.** A
+  `ParseResult` with `{ Number, Subtitle, Kind, MatchedBy: string,
+  Confidence: enum }` (or similar) turns "why did this file get tagged
+  chapter 10 instead of volume 10" from an archaeology exercise (as it
+  was in this session) into a log line. The Python version has no
+  equivalent — `extract_episode_info` returns `None` or a bare
+  `EpisodeInfo`, with no record of which branch fired.
+- **Ship the real-world filename corpus this session discovered as the
+  parser's test suite from day one**, not something to rediscover file by
+  file against a live library:
+  - `Ep 2027 - The Strength of the Wolf.mp3` (labeled chapter, subtitle)
+  - `1114.m4a`, `1114..m4a` (bare number, incl. upstream double-dot artifact)
+  - `5-6.m4a` (bare range, hyphen separator)
+  - `Shadow Slave 1751-1846.m4a` (title prefix + trailing range)
+  - `0001_0100_Weakest_Beast_Tamer.mp3` (leading range, underscore separator,
+    title suffix)
+  - `Shadow Slave Volume 10 Dark Lord's Dreadful Travelogue.m4a` (volume,
+    not a chapter — must not collide with chapter 10)
+  - `random_upload_name.mp3`, `totally_untitled_file.mp3` (unparseable —
+    must return "no match," never a guess)
+- **Build state-repair as a first-class subsystem from the start**, not
+  bolted on after data is already wrong. The Python `--mode
+  reprocess`/`--mode verify` pair (§2, §4) only exist *because* bugs
+  #1–#3 happened to real data — design the C# port assuming that kind of
+  reconciliation tool will always eventually be needed for a system that
+  derives structured metadata from unstructured, uploader-controlled
+  filenames, and build the "find files whose current state disagrees
+  with what re-deriving from source would produce" capability alongside
+  the primary pipeline, not after the first incident.
+- **Add a dry-run/preview mode to any bulk re-tag or state-repair
+  operation before it touches files.** Step 4 above — manually
+  reconstructing lost data from a terminal scrollback — would have been
+  unnecessary with a `--dry-run` flag that prints "file X would become Y
+  (source: bare-number parser, confidence: high)" for review before
+  committing. This is cheap to build in from the start and expensive to
+  wish for after a bad run.
+- **Keep the good parts.** Several things about the Python version held
+  up well under real usage and are worth preserving as-is, not just
+  improving on: atomic `.tmp` writes, the FloodWait retry shape, the
+  never-overwrite dedup-suffix rule (this is *why* the mistagging
+  incidents above never lost data, only mislabeled it — every wrong
+  guess just landed as its own separate file rather than clobbering a
+  correct one), and testing with hand-written fakes instead of a mocking
+  framework.
+
+## 11. Things to explicitly re-verify before porting (don't trust this doc)
 
 This file is a snapshot, not a live contract. Before treating any claim
 above as ground truth for the port:
