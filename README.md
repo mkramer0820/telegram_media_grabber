@@ -122,20 +122,30 @@ newest-first, and scanning stops for a channel once a message older than
 **`audiobook_mode` channels** are post-processed by
 `src/downloader/audiobook_processor.py` immediately after each chapter's
 atomic download completes: the episode number and subtitle are parsed from
-the filename — either "Ep &lt;n&gt; - &lt;subtitle&gt;", or a cleanly-delimited bare
-number/range anywhere in the filename (leading, trailing, or the whole
-stem) like "1114", "5-6", "Shadow Slave 1751-1846" (trailing range), or
-"0001_0100_Weakest_Beast_Tamer" (leading range, "_" separator; a range
-uses its start number) — never from the Telegram message ID. If the
-filename has no parsable number at all, the next
-episode number is inferred from the highest "Ep n" already in the
-destination directory, plus one. ID3/MP4 tags
+the filename, in order:
+1. "Ep &lt;n&gt; - &lt;subtitle&gt;" (or "Episode"/"ep."/colon separator).
+2. "Vol &lt;n&gt; &lt;subtitle&gt;" (or "Volume"/"vol.") — a whole compiled book
+   bundling many chapters into one file. Tagged/named as `Vol NN` (2-digit
+   padding), never `Ep NNNN` — a volume must never collide with or be
+   mistaken for a real chapter, even if they share the same number (e.g.
+   Volume 1 vs. chapter Ep 1 are unrelated).
+3. A cleanly-delimited bare number/range anywhere in the filename (leading,
+   trailing, or the whole stem) like "1114", "5-6", "Shadow Slave 1751-1846"
+   (trailing range), or "0001_0100_Weakest_Beast_Tamer" (leading range, "_"
+   separator; a range uses its start number).
+
+Never from the Telegram message ID. If the filename has no parsable number
+at all, the next episode number is inferred from the highest "Ep n"
+already in the destination directory, plus one (volumes are excluded from
+this inference — they're a separate number space). ID3/MP4 tags
 (Artist, Album, Title, Track) are embedded via `mutagen`, and the file is
 moved — via `shutil.move`, safe across filesystem boundaries — into
 `{AUDIOBOOKS_DEST_DIR}/{author}/{novel_title}/`. `audiobook_mode: true`
 requires a `metadata` block (`author` + `novel_title`); config loading fails
 fast if it's missing. Chapters are kept as individual files — there is no
-`ffmpeg` dependency or `.m4b` concatenation step.
+`ffmpeg` dependency or `.m4b` concatenation step (a "Volume" file is
+already a pre-bundled compilation from the source, not something this app
+concatenates itself).
 
 If a channel was downloaded with `audiobook_mode` off (or before this
 episode-number logic existed) and files are stuck in staging or tagged with

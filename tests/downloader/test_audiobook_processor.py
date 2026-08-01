@@ -131,6 +131,45 @@ def test_extraction_parses_underscore_separated_range() -> None:
     assert info.episode == 201
 
 
+# -- extract_episode_info: volumes -------------------------------------------
+
+
+def test_extraction_parses_volume_with_subtitle_using_vol_label() -> None:
+    # A whole bundled book must never be tagged/numbered as a chapter.
+    info = extract_episode_info("Shadow Slave Volume 10 Dark Lord's Dreadful Travelogue.m4a")
+    assert info is not None
+    assert info.episode == 10
+    assert info.subtitle == "Dark Lord's Dreadful Travelogue"
+    assert info.label == "Vol"
+    assert info.pad_width == 2
+
+
+def test_extraction_parses_volume_abbreviation_and_period() -> None:
+    for name in ["Shadow Slave Vol 3 Prince of Nothing.m4a", "Shadow Slave Vol. 3 Prince of Nothing.m4a"]:
+        info = extract_episode_info(name)
+        assert info is not None
+        assert info.episode == 3
+        assert info.subtitle == "Prince of Nothing"
+        assert info.label == "Vol"
+
+
+def test_extraction_parses_volume_with_no_trailing_subtitle() -> None:
+    info = extract_episode_info("Shadow Slave Volume 1.m4a")
+    assert info is not None
+    assert info.episode == 1
+    assert info.subtitle is None
+    assert info.label == "Vol"
+
+
+def test_extraction_prefers_episode_pattern_over_volume_pattern() -> None:
+    # A string that happens to contain "Vol" text but is unambiguously an
+    # "Ep n" chapter must still be tagged as a chapter, not a volume.
+    info = extract_episode_info("Ep 5 - Evolving Powers.mp3")
+    assert info is not None
+    assert info.episode == 5
+    assert info.label == "Ep"
+
+
 # -- format_title ---------------------------------------------------------
 
 
@@ -142,6 +181,11 @@ def test_format_title_uses_subtitle_when_present() -> None:
 def test_format_title_falls_back_to_novel_title_when_subtitle_missing() -> None:
     info = EpisodeInfo(episode=9, subtitle=None)
     assert format_title("Shadow Slave", info) == "Shadow Slave - Ep 9"
+
+
+def test_format_title_uses_vol_label_for_volumes() -> None:
+    info = EpisodeInfo(episode=10, subtitle="Dark Lord's Dreadful Travelogue", label="Vol", pad_width=2)
+    assert format_title("Shadow Slave", info) == "Vol 10 - Dark Lord's Dreadful Travelogue"
 
 
 # -- infer_next_episode_number / book_dir -----------------------------------
@@ -253,6 +297,15 @@ def test_build_destination_path_pads_episode_number(tmp_path: Path) -> None:
     assert "Ep 0007" in destination.name
 
 
+def test_build_destination_path_uses_vol_label_and_two_digit_padding(tmp_path: Path) -> None:
+    metadata = AudiobookMetadata(author="Guiltythree", novel_title="Shadow Slave")
+    info = EpisodeInfo(episode=1, subtitle="Child of Shadows", label="Vol", pad_width=2)
+
+    destination = build_destination_path(tmp_path, metadata, info, ".m4a")
+
+    assert destination.name == "Shadow Slave - Vol 01 - Child of Shadows.m4a"
+
+
 def test_build_destination_path_sanitizes_unsafe_author_and_title(tmp_path: Path) -> None:
     metadata = AudiobookMetadata(author="Author: <Evil>", novel_title="Title/With\\Slashes")
     info = EpisodeInfo(episode=1, subtitle=None)
@@ -327,6 +380,42 @@ async def test_process_audiobook_file_tags_and_moves_into_author_title_layout(
     assert tags["album"] == ["Shadow Slave"]
     assert tags["tracknumber"] == ["2027"]
     assert tags["title"] == ["Ep 2027 - The Strength of the Wolf"]
+
+
+async def test_process_audiobook_file_tags_a_whole_volume_distinctly_from_chapters(
+    tmp_path: Path,
+) -> None:
+    staging_dir = tmp_path / "staging"
+    staging_dir.mkdir()
+    dest_root = tmp_path / "Audiobooks"
+
+    # An existing real chapter "Ep 1" must never be confused with, or
+    # collide with, a volume file that happens to also be "number 1".
+    existing_chapter_dir = dest_root / "Guiltythree" / "Shadow Slave"
+    existing_chapter_dir.mkdir(parents=True)
+    (existing_chapter_dir / "Shadow Slave - Ep 0001.mp3").write_bytes(b"chapter one")
+
+    source = staging_dir / "Shadow Slave Volume 1 Child of Shadows.mp3"
+    _write_dummy_mp3(source)
+    metadata = AudiobookMetadata(author="Guiltythree", novel_title="Shadow Slave")
+
+    result_path = await process_audiobook_file(
+        source, message_id=1, metadata=metadata, dest_root=dest_root
+    )
+
+    assert result_path == (
+        existing_chapter_dir / "Shadow Slave - Vol 01 - Child of Shadows.mp3"
+    )
+    assert result_path.exists()
+    # The pre-existing chapter file is untouched, not overwritten/suffixed —
+    # "Vol 01" and "Ep 0001" are different filenames, no collision at all.
+    assert (existing_chapter_dir / "Shadow Slave - Ep 0001.mp3").read_bytes() == b"chapter one"
+
+    tags = EasyID3(result_path)  # type: ignore[no-untyped-call]
+    assert tags["artist"] == ["Guiltythree"]
+    assert tags["album"] == ["Shadow Slave"]
+    assert tags["tracknumber"] == ["1"]
+    assert tags["title"] == ["Vol 1 - Child of Shadows"]
 
 
 async def test_process_audiobook_file_infers_episode_one_when_untitled_and_dest_empty(

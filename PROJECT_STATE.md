@@ -45,16 +45,19 @@ Implemented and working (all covered by `mypy --strict` + pytest):
   `source_dir` (optionally recursive) to a `target_chat`; upload dedup via
   a fast filename+size+first-1MiB-hash key, scoped per target chat.
 - Docker: `Dockerfile`, `docker-compose.yml`, `.dockerignore`.
-- Audiobook episode-number extraction from the raw filename itself — a
-  cleanly-delimited bare number or range anywhere in the filename
+- Audiobook episode-number extraction from the raw filename itself, tried
+  in order: "Ep n" pattern; "Vol n" pattern (a whole bundled book — tagged
+  `Vol NN`, 2-digit padding, a completely separate number/label space from
+  chapters, never `Ep NNNN`, never colliding with a same-numbered chapter);
+  then a cleanly-delimited bare number or range anywhere in the filename
   (leading, trailing, or the whole stem — e.g. "1114", "5-6",
   "Shadow Slave 1751-1846" (trailing range), or
   "0001_0100_Weakest_Beast_Tamer" (leading range, "_" separator); a range
-  uses its start number) — never from Telegram's message ID. If the
+  uses its start number). Never from Telegram's message ID. If the
   filename has no number at all, `infer_next_episode_number` (highest
-  existing "Ep n" in the destination directory + 1) is the fallback;
-  message ID is never part of the number in any path, only used for log
-  traceability.
+  existing "Ep n" in the destination directory + 1 — volumes excluded)
+  is the fallback; message ID is never part of the number in any path,
+  only used for log traceability.
 - `--mode reprocess` (offline): finds `audiobook_mode` files that were
   downloaded but never tagged/relocated out of staging — either because
   `audiobook_mode` was enabled after they were already downloaded (dedup
@@ -218,18 +221,27 @@ porting it.
   deterministic order. Missing `source_dir` yields zero items for that job,
   not an error (normal "nothing to upload yet" state).
 - **Audiobook episode extraction** (`downloader/audiobook_processor.py::extract_episode_info`):
-  tries "Ep <n> - <subtitle>" first (with a specific "trailing uploader
-  tag" peel-off rule — see the two regex comments, the space-before-hyphen
-  distinction is load-bearing, don't simplify it away), then a
-  cleanly-delimited bare number/range *anywhere* in the filename stem —
-  leading, trailing, or the whole stem (e.g. "1114", "5-6",
-  "Shadow Slave 1751-1846" — trailing range with a title prefix — or
-  "0001_0100_Weakest_Beast_Tamer" — leading range with a title suffix,
-  "_" as the separator — using the range's start). "Cleanly-delimited"
-  means bounded by the stem's edges or a whitespace/underscore/hyphen/dot
-  separator on each side — a digit run merely adjacent to other text
-  without such a boundary doesn't count. Returns `None`, not a guess, when
-  nothing matches — `process_audiobook_file` only then falls back to
+  tries three patterns in order. (1) "Ep <n> - <subtitle>" (with a
+  specific "trailing uploader tag" peel-off rule — see the two regex
+  comments, the space-before-hyphen distinction is load-bearing, don't
+  simplify it away). (2) "Vol <n> <subtitle>" (or "Volume"/"vol.") — a
+  whole compiled book bundling many chapters into one file. This gets
+  `EpisodeInfo(label="Vol", pad_width=2)` instead of the default
+  `("Ep", 4)` — a *different label and number space*, so a volume can
+  never collide with, or render indistinguishably from, a same-numbered
+  chapter (Volume 1 and chapter Ep 1 are unrelated; both can coexist).
+  `infer_next_episode_number`/`parse_tagged_episode_number` deliberately
+  only recognize "Ep", not "Vol", so volume numbers never leak into
+  chapter-number inference or vice versa. (3) A cleanly-delimited bare
+  number/range *anywhere* in the filename stem — leading, trailing, or
+  the whole stem (e.g. "1114", "5-6", "Shadow Slave 1751-1846" — trailing
+  range with a title prefix — or "0001_0100_Weakest_Beast_Tamer" —
+  leading range with a title suffix, "_" as the separator — using the
+  range's start). "Cleanly-delimited" means bounded by the stem's edges
+  or a whitespace/underscore/hyphen/dot separator on each side — a digit
+  run merely adjacent to other text without such a boundary doesn't
+  count. Returns `None`, not a guess, when nothing matches —
+  `process_audiobook_file` only then falls back to
   `infer_next_episode_number` (highest existing "Ep n" in the destination
   dir + 1). The Telegram message ID is *never* used as an episode number —
   it's an arbitrary ID shared across the whole chat, unrelated to the
@@ -303,7 +315,7 @@ typing** for Telethon objects rather than a mocking framework or live
 network calls (`FakeClient`, `FakeMessage`, `FakeDocumentAttribute`, etc. —
 see `tests/downloader/test_worker.py` for the fullest example). Real
 `StateStore` instances against `tmp_path` SQLite files, not mocked. This
-kept the whole suite at ~2-3 seconds for 149 tests with zero flakiness from
+kept the whole suite at ~2-3 seconds for 156 tests with zero flakiness from
 mocking mismatches. A C# port should use the equivalent (hand-written test
 doubles implementing the same interfaces, or `WTelegramClient`'s own
 test-friendly seams if it has them) over a heavy mocking framework, for the

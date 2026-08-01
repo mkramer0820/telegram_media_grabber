@@ -70,27 +70,54 @@ _TRAILING_UPLOADER_TAG_PATTERN = re.compile(r"^(?P<subtitle>.+?)-[A-Za-z0-9]+$")
 # doesn't get misread as a number.
 _NUMBER_TOKEN_PATTERN = re.compile(r"(?:^|[\s_-])(?P<start>\d+)(?:[-_](?P<end>\d+))?(?=$|[\s_.-])")
 
+# Matches "Volume 10 Dark Lord's Dreadful Travelogue" (case-insensitive,
+# "Vol"/"Vol."/"Volume" all accepted), capturing the volume number and
+# everything after it as a subtitle. A "volume" is a whole compiled book —
+# many chapters bundled into one file — and MUST NOT be tagged/numbered as
+# if it were a single chapter: it gets its own "Vol N" label and number
+# space (see EpisodeInfo.label), never "Ep N", so it can never collide
+# with or be confused for a real per-chapter file in the same library.
+_VOLUME_PATTERN = re.compile(r"\bvol(?:ume)?\.?\s*(?P<volume>\d+)\b\s*(?P<rest>.*)$", re.IGNORECASE)
+
 # Scans an already-tagged destination filename (e.g. "Shadow Slave - Ep 0009
 # - Title.mp3") for its episode number, used only by
-# infer_next_episode_number's directory scan.
+# infer_next_episode_number's directory scan. Deliberately only matches
+# "Ep", not "Vol" — volume numbering is a separate space and must not
+# influence (or be influenced by) chapter-number inference.
 _EXISTING_EPISODE_TAG_PATTERN = re.compile(r"\bEp\s*(?P<episode>\d+)\b", re.IGNORECASE)
+
+_EPISODE_LABEL = "Ep"
+_VOLUME_LABEL = "Vol"
 
 
 @dataclass(frozen=True, slots=True)
 class EpisodeInfo:
-    """A chapter's episode number and optional subtitle."""
+    """A chapter's (or whole volume's) number and optional subtitle.
+
+    `label` and `pad_width` distinguish a single chapter ("Ep", 4-digit
+    padding — chapter counts run into the thousands) from a whole bundled
+    volume ("Vol", 2-digit padding — books rarely exceed double digits).
+    They're never mixed: a volume is never tagged/named as "Ep N".
+    """
 
     episode: int
     subtitle: str | None
+    label: str = _EPISODE_LABEL
+    pad_width: int = 4
 
 
 def extract_episode_info(raw_filename: str) -> EpisodeInfo | None:
     """Extract an episode number and subtitle from a raw Telegram filename.
 
-    Tries two patterns, in order:
+    Tries three patterns, in order:
       1. "Ep <n> - <subtitle>" (or "Episode"/"ep."/colon separator) anywhere
          in the filename stem.
-      2. A cleanly-delimited bare number or number range anywhere in the
+      2. "Vol <n> <subtitle>" (or "Volume"/"vol.") anywhere in the stem — a
+         whole compiled book, tagged/numbered separately from chapters
+         (see `EpisodeInfo.label`), e.g. "Shadow Slave Volume 10 Dark
+         Lord's Dreadful Travelogue" -> volume 10, subtitle "Dark Lord's
+         Dreadful Travelogue".
+      3. A cleanly-delimited bare number or number range anywhere in the
          stem — leading, trailing, or the whole stem — e.g. "1114", "5-6",
          "Shadow Slave 1751-1846" (trailing range), or
          "0001_0100_Weakest_Beast_Tamer" (leading range). A range uses its
@@ -103,8 +130,8 @@ def extract_episode_info(raw_filename: str) -> EpisodeInfo | None:
             or "1114.m4a".
 
     Returns:
-        An `EpisodeInfo` if either pattern matched, otherwise `None` — the
-        caller decides what to do when no episode number is present in the
+        An `EpisodeInfo` if any pattern matched, otherwise `None` — the
+        caller decides what to do when no number is present in the
         filename at all (see `infer_next_episode_number`).
     """
     stem = Path(raw_filename).stem
@@ -116,6 +143,12 @@ def extract_episode_info(raw_filename: str) -> EpisodeInfo | None:
         tag_match = _TRAILING_UPLOADER_TAG_PATTERN.match(rest)
         subtitle = tag_match.group("subtitle").strip() if tag_match else rest
         return EpisodeInfo(episode=episode, subtitle=subtitle or None)
+
+    volume_match = _VOLUME_PATTERN.search(stem)
+    if volume_match is not None:
+        volume = int(volume_match.group("volume"))
+        subtitle = volume_match.group("rest").strip() or None
+        return EpisodeInfo(episode=volume, subtitle=subtitle, label=_VOLUME_LABEL, pad_width=2)
 
     numeric_match = _NUMBER_TOKEN_PATTERN.search(stem)
     if numeric_match is not None:
@@ -175,20 +208,21 @@ def infer_next_episode_number(dest_dir: Path) -> int:
 
 
 def format_title(novel_title: str, info: EpisodeInfo) -> str:
-    """Build the Title tag value for one chapter.
+    """Build the Title tag value for one chapter or volume.
 
     Args:
         novel_title: The audiobook's title, used as a fallback when no
             subtitle was extracted.
-        info: The chapter's extracted episode/subtitle.
+        info: The extracted episode/volume number and subtitle.
 
     Returns:
-        `"Ep {n} - {subtitle}"`, or `"{novel_title} - Ep {n}"` when
-        `info.subtitle` is `None`.
+        `"{label} {n} - {subtitle}"`, or `"{novel_title} - {label} {n}"`
+        when `info.subtitle` is `None`. `label` is "Ep" for a chapter or
+        "Vol" for a whole bundled volume — never mixed.
     """
     if info.subtitle:
-        return f"Ep {info.episode} - {info.subtitle}"
-    return f"{novel_title} - Ep {info.episode}"
+        return f"{info.label} {info.episode} - {info.subtitle}"
+    return f"{novel_title} - {info.label} {info.episode}"
 
 
 def book_dir(dest_root: Path, metadata: AudiobookMetadata) -> Path:
@@ -218,18 +252,21 @@ def build_destination_path(
         dest_root: Configured audiobook destination root
             (`Settings.audiobooks_dest_dir`).
         metadata: Author/novel_title for this channel.
-        info: The chapter's extracted episode/subtitle.
+        info: The extracted episode/volume number and subtitle.
         suffix: File extension to use, including the leading dot.
 
     Returns:
         The sanitized, collision-free-candidate destination path (final
         collision handling is the caller's responsibility, matching the
-        existing `dedup_suffixed_path` convention used elsewhere).
+        existing `dedup_suffixed_path` convention used elsewhere). Uses
+        `info.label` ("Ep"/"Vol") and `info.pad_width` so a volume never
+        gets filed under a chapter-shaped name.
     """
+    padded = str(info.episode).zfill(info.pad_width)
     if info.subtitle:
-        base_name = f"{metadata.novel_title} - Ep {info.episode:04d} - {info.subtitle}{suffix}"
+        base_name = f"{metadata.novel_title} - {info.label} {padded} - {info.subtitle}{suffix}"
     else:
-        base_name = f"{metadata.novel_title} - Ep {info.episode:04d}{suffix}"
+        base_name = f"{metadata.novel_title} - {info.label} {padded}{suffix}"
     filename = sanitize_filename(base_name)
 
     return book_dir(dest_root, metadata) / filename
