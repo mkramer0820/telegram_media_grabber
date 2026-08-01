@@ -31,6 +31,14 @@ CREATE TABLE IF NOT EXISTS downloaded_files (
 
 CREATE INDEX IF NOT EXISTS idx_downloaded_files_hash
     ON downloaded_files (content_hash);
+
+CREATE TABLE IF NOT EXISTS uploaded_files (
+    target_chat TEXT NOT NULL,
+    dedup_key TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    uploaded_at TEXT NOT NULL,
+    PRIMARY KEY (target_chat, dedup_key)
+);
 """
 
 
@@ -141,6 +149,45 @@ class StateStore:
                 (content_hash,),
             )
             return [Path(row[0]) for row in cursor.fetchall()]
+
+    async def is_file_uploaded(self, target_chat: str, dedup_key: str) -> bool:
+        """Return True if `dedup_key` has already been uploaded to `target_chat`.
+
+        Args:
+            target_chat: Stringified destination chat ID/username the file
+                was (or would be) sent to.
+            dedup_key: Stable dedup key from `src.uploader.dedup.compute_dedup_key`.
+        """
+        async with self._lock:
+            cursor = self._conn.execute(
+                "SELECT 1 FROM uploaded_files WHERE target_chat = ? AND dedup_key = ?",
+                (target_chat, dedup_key),
+            )
+            return cursor.fetchone() is not None
+
+    async def mark_file_uploaded(self, target_chat: str, dedup_key: str, file_path: Path) -> None:
+        """Record a successful upload.
+
+        Callers MUST only invoke this after `upload_document` has returned
+        successfully — never before, and never for a file that failed to
+        send (CLAUDE.md Section 2.5's "state only reflects durable success"
+        rule, applied to uploads).
+
+        Args:
+            target_chat: Stringified destination chat ID/username.
+            dedup_key: Stable dedup key identifying the uploaded file.
+            file_path: Local path of the uploaded file.
+        """
+        async with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO uploaded_files (target_chat, dedup_key, file_path, uploaded_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(target_chat, dedup_key) DO NOTHING
+                """,
+                (target_chat, dedup_key, str(file_path), _utc_now_iso()),
+            )
+            self._conn.commit()
 
     def close(self) -> None:
         """Close the underlying SQLite connection."""

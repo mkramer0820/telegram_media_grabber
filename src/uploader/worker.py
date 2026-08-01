@@ -11,9 +11,11 @@ do, and sequential processing keeps `upload_document`'s FloodWait/backoff
 policy simple to reason about (CLAUDE.md Section 4.4's bounded-concurrency
 requirement is trivially satisfied at concurrency=1).
 
-Known gap: this worker does not persist which files were already uploaded
-across runs (no `StateStore` integration) — re-running upload mode
-re-uploads every file currently present in the source directory.
+Deduplication: each file is checked against `StateStore.is_file_uploaded`
+(keyed by `src.uploader.dedup.compute_dedup_key`, scoped to the target chat)
+before upload, and recorded via `StateStore.mark_file_uploaded` immediately
+after a successful send — mirroring the downloader's dedup/state pattern in
+`src/downloader/worker.py`.
 """
 
 from __future__ import annotations
@@ -26,6 +28,8 @@ from typing import Protocol
 from telethon import TelegramClient
 
 from src.core.client import upload_document
+from src.storage.state import StateStore
+from src.uploader.dedup import compute_dedup_key
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +49,7 @@ class UploadQueueProgress:
 
     files_total: int
     files_uploaded: int
+    files_skipped: int
     done: bool
 
 
@@ -65,6 +70,9 @@ class UploadProgressReporter(Protocol):
     def on_file_error(self, filename: str, error: str) -> None:
         """Called when a file permanently fails after exhausting retries."""
 
+    def on_file_skipped(self, filename: str) -> None:
+        """Called when a file is skipped because it was already uploaded."""
+
     def on_queue_progress(self, progress: UploadQueueProgress) -> None:
         """Called as files are processed from the queue."""
 
@@ -81,6 +89,9 @@ class _NullUploadProgressReporter:
     def on_file_error(self, filename: str, error: str) -> None:
         """Discard the update."""
 
+    def on_file_skipped(self, filename: str) -> None:
+        """Discard the update."""
+
     def on_queue_progress(self, progress: UploadQueueProgress) -> None:
         """Discard the update."""
 
@@ -93,6 +104,7 @@ class UploaderWorker:
         client: TelegramClient,
         target_chat: int | str,
         source_directory: Path,
+        state_store: StateStore,
         reporter: UploadProgressReporter | None = None,
     ) -> None:
         """Initialize the worker.
@@ -102,12 +114,15 @@ class UploaderWorker:
             target_chat: Destination chat ID, "@username", or invite link,
                 as accepted by `src.core.client.resolve_entity`.
             source_directory: Local directory scanned for files to upload.
+            state_store: Shared state store used to skip files already
+                uploaded to `target_chat` and to record newly uploaded ones.
             reporter: Optional progress callback surface (e.g. the `rich`
                 upload dashboard). Defaults to a no-op implementation.
         """
         self._client = client
         self._target_chat = target_chat
         self._source_directory = source_directory
+        self._state_store = state_store
         self._reporter: UploadProgressReporter = reporter or _NullUploadProgressReporter()
         self._queue: list[Path] = []
 
@@ -134,17 +149,32 @@ class UploaderWorker:
     async def process_queue(self) -> None:
         """Upload every queued file in order, reporting progress as it goes.
 
-        Builds the queue first if `build_queue` hasn't been called yet. A
-        single file's failure is reported via `on_file_error` and does not
-        stop the remaining queue from being processed.
+        Builds the queue first if `build_queue` hasn't been called yet. Each
+        file is checked against `state_store` first; files already uploaded
+        to `target_chat` are skipped rather than re-sent. A single file's
+        failure is reported via `on_file_error` and does not stop the
+        remaining queue from being processed.
         """
         if not self._queue:
             self.build_queue()
 
+        target_chat = str(self._target_chat)
         total = len(self._queue)
         uploaded = 0
+        skipped = 0
 
         for file_path in self._queue:
+            dedup_key = compute_dedup_key(file_path)
+
+            if await self._state_store.is_file_uploaded(target_chat, dedup_key):
+                logger.info("Skipping already-uploaded file: %s", file_path)
+                skipped += 1
+                self._reporter.on_file_skipped(file_path.name)
+                self._reporter.on_queue_progress(
+                    UploadQueueProgress(total, uploaded, skipped, done=False)
+                )
+                continue
+
             try:
 
                 def _progress(current: int, total_bytes: int, _name: str = file_path.name) -> None:
@@ -162,9 +192,12 @@ class UploaderWorker:
                 logger.exception("Permanent failure uploading %s", file_path)
                 self._reporter.on_file_error(file_path.name, str(exc))
             else:
+                await self._state_store.mark_file_uploaded(target_chat, dedup_key, file_path)
                 uploaded += 1
                 self._reporter.on_file_complete(file_path.name)
 
-            self._reporter.on_queue_progress(UploadQueueProgress(total, uploaded, done=False))
+            self._reporter.on_queue_progress(
+                UploadQueueProgress(total, uploaded, skipped, done=False)
+            )
 
-        self._reporter.on_queue_progress(UploadQueueProgress(total, uploaded, done=True))
+        self._reporter.on_queue_progress(UploadQueueProgress(total, uploaded, skipped, done=True))

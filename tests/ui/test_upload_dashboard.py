@@ -19,11 +19,11 @@ def _console() -> Console:
 def test_upload_dashboard_handles_full_progress_lifecycle() -> None:
     console = _console()
     with UploadDashboard(console) as dashboard:
-        dashboard.on_queue_progress(UploadQueueProgress(2, 0, done=False))
+        dashboard.on_queue_progress(UploadQueueProgress(2, 0, 0, done=False))
         dashboard.on_file_progress(UploadFileProgress("book.pdf", 0, 100))
         dashboard.on_file_progress(UploadFileProgress("book.pdf", 50, 100))
         dashboard.on_file_complete("book.pdf")
-        dashboard.on_queue_progress(UploadQueueProgress(2, 2, done=True))
+        dashboard.on_queue_progress(UploadQueueProgress(2, 2, 0, done=True))
 
     output = console.file.getvalue()  # type: ignore[attr-defined]
     assert "book.pdf" in output
@@ -37,3 +37,14 @@ def test_upload_dashboard_reports_file_errors_without_raising() -> None:
 
     output = console.file.getvalue()  # type: ignore[attr-defined]
     assert "network unreachable" in output
+
+
+def test_upload_dashboard_reports_skipped_files_without_raising() -> None:
+    console = _console()
+    with UploadDashboard(console) as dashboard:
+        dashboard.on_file_skipped("already_sent.zip")
+        dashboard.on_queue_progress(UploadQueueProgress(1, 0, 1, done=True))
+
+    output = console.file.getvalue()  # type: ignore[attr-defined]
+    assert "already_sent.zip" in output
+    assert "1 skipped" in output

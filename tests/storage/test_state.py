@@ -75,6 +75,28 @@ async def test_find_by_content_hash_no_match_returns_empty(db_path: Path) -> Non
         assert await store.find_by_content_hash("nonexistent") == []
 
 
+async def test_is_file_uploaded_false_until_marked(db_path: Path) -> None:
+    async with StateStore(db_path) as store:
+        assert await store.is_file_uploaded("@chan", "a.txt:1:deadbeef") is False
+        await store.mark_file_uploaded("@chan", "a.txt:1:deadbeef", Path("uploads/a.txt"))
+        assert await store.is_file_uploaded("@chan", "a.txt:1:deadbeef") is True
+
+
+async def test_is_file_uploaded_scoped_per_target_chat(db_path: Path) -> None:
+    async with StateStore(db_path) as store:
+        await store.mark_file_uploaded("@chan_a", "a.txt:1:deadbeef", Path("uploads/a.txt"))
+        assert await store.is_file_uploaded("@chan_a", "a.txt:1:deadbeef") is True
+        assert await store.is_file_uploaded("@chan_b", "a.txt:1:deadbeef") is False
+
+
+async def test_mark_file_uploaded_is_idempotent(db_path: Path) -> None:
+    async with StateStore(db_path) as store:
+        await store.mark_file_uploaded("@chan", "a.txt:1:deadbeef", Path("uploads/a.txt"))
+        # Re-marking the same (target_chat, dedup_key) must not raise.
+        await store.mark_file_uploaded("@chan", "a.txt:1:deadbeef", Path("uploads/a.txt"))
+        assert await store.is_file_uploaded("@chan", "a.txt:1:deadbeef") is True
+
+
 async def test_concurrent_writes_are_serialized_without_corruption(db_path: Path) -> None:
     """Many concurrent tasks hammering the same StateStore must not corrupt
     it or raise "database is locked" errors — the internal asyncio.Lock

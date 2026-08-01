@@ -91,14 +91,16 @@ async def _run_upload(settings: Settings, console: Console, client: TelegramClie
         f"Uploading files from [bold]{source_directory}[/bold] to [bold]{target_chat}[/bold]."
     )
 
-    with UploadDashboard(console) as dashboard:
-        worker = UploaderWorker(
-            client=client,
-            target_chat=target_chat,
-            source_directory=source_directory,
-            reporter=dashboard,
-        )
-        await worker.process_queue()
+    async with StateStore(settings.state_db_path) as state_store:
+        with UploadDashboard(console) as dashboard:
+            worker = UploaderWorker(
+                client=client,
+                target_chat=target_chat,
+                source_directory=source_directory,
+                state_store=state_store,
+                reporter=dashboard,
+            )
+            await worker.process_queue()
 
 
 async def run(settings: Settings, console: Console, mode: str) -> None:

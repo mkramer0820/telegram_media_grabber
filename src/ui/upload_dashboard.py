@@ -105,10 +105,18 @@ class UploadDashboard:
         self._status_line = f"[red]Failed[/red] ({filename}): {error}"
         self._refresh()
 
+    def on_file_skipped(self, filename: str) -> None:
+        """Log a status line for a file skipped as already uploaded."""
+        self._status_line = f"[dim]Skipped (already uploaded):[/dim] {filename}"
+        self._refresh()
+
     def on_queue_progress(self, progress: UploadQueueProgress) -> None:
         """Update the overall queue status line."""
         status = "done" if progress.done else "uploading"
-        self._queue_status = f"Queue: {progress.files_uploaded}/{progress.files_total} ({status})"
+        self._queue_status = (
+            f"Queue: {progress.files_uploaded} uploaded, {progress.files_skipped} skipped, "
+            f"{progress.files_total} total ({status})"
+        )
         self._refresh()
 
     # -- context manager ------------------------------------------------
