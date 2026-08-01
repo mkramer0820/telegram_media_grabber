@@ -68,7 +68,7 @@ async def _run_download(settings: Settings, console: Console, client: TelegramCl
 
 
 async def _run_upload(settings: Settings, console: Console, client: TelegramClient) -> None:
-    """Scan the configured source directory and upload its files to the target chat.
+    """Run every configured upload job, sending each job's files to its target chat.
 
     Args:
         settings: Fully-loaded application settings (env + channels.yaml).
@@ -76,27 +76,22 @@ async def _run_upload(settings: Settings, console: Console, client: TelegramClie
         client: A connected, authenticated `TelegramClient`.
 
     Raises:
-        DownloaderError: If `upload_target_channel` is not set in
-            `config/channels.yaml`.
+        DownloaderError: If `upload_jobs` is empty in `config/channels.yaml`.
     """
-    target_chat = settings.channels_file.upload_target_channel
-    if target_chat is None:
+    upload_jobs = settings.channels_file.upload_jobs
+    if not upload_jobs:
         raise DownloaderError(
-            "upload_target_channel is not set in config/channels.yaml; "
-            "upload mode has nothing to send files to."
+            "No upload_jobs configured in config/channels.yaml; "
+            "upload mode has nothing to send."
         )
-    source_directory = settings.channels_file.upload_source_directory
 
-    console.print(
-        f"Uploading files from [bold]{source_directory}[/bold] to [bold]{target_chat}[/bold]."
-    )
+    console.print(f"Running [bold]{len(upload_jobs)}[/bold] upload job(s).")
 
     async with StateStore(settings.state_db_path) as state_store:
         with UploadDashboard(console) as dashboard:
             worker = UploaderWorker(
                 client=client,
-                target_chat=target_chat,
-                source_directory=source_directory,
+                upload_jobs=upload_jobs,
                 state_store=state_store,
                 reporter=dashboard,
             )

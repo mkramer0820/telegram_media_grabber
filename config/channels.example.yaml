@@ -7,10 +7,17 @@
 download_root: downloads          # base dir for non-audiobook output_subdirs
 max_concurrent_downloads: 5       # 1-50; shared semaphore across ALL channels
 
-# Upload mode (`python -m src.main --mode upload`) settings. Both are
-# optional; upload_target_channel must be set before upload mode can run.
-upload_target_channel: "@some_public_channel"  # numeric chat ID also works
-upload_source_directory: uploads               # local dir scanned for files to send
+# Upload mode (`python -m src.main --mode upload`) settings. Each job routes
+# one local directory to one destination chat; upload mode has nothing to
+# send if upload_jobs is empty/omitted. Files within a job are batched into
+# Telegram media groups (albums) of up to 10 at a time.
+upload_jobs:
+  - source_dir: uploads/photos_channel
+    target_chat: "@some_public_channel"  # numeric chat ID also works
+    recursive: false                     # only uploads/photos_channel's top-level files
+  - source_dir: uploads/docs_archive
+    target_chat: -1001234567890
+    recursive: true                      # also uploads files in subfolders
 
 channels:
 
@@ -81,7 +88,7 @@ channels:
 # NOTE: `min_date` is accepted by the schema but is not yet enforced by the
 # downloader (no messages are filtered by date today) — don't rely on it.
 #
-# upload_target_channel   (optional*) *Required to run upload mode. Chat ID
-#                                      or "@username" files are sent to.
-# upload_source_directory (optional)  Default "uploads". Local dir scanned
-#                                      (non-recursively) for files to send.
+# upload_jobs (optional) List of {source_dir, target_chat, recursive} entries
+#             for upload mode; empty/omitted means upload mode has nothing
+#             to send. source_dir/target_chat are required per job;
+#             recursive defaults to false (top-level files only).

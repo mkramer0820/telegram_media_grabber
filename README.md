@@ -89,9 +89,21 @@ channels:
       novel_title: "Shadow Slave"
 ```
 
-`upload_target_channel` (chat ID or `@username`) and `upload_source_directory`
-(default `uploads`) configure upload mode (see "Running" below) — files
-placed in that directory are uploaded to that chat.
+`upload_jobs` configures upload mode (see "Running" below): a list of
+`{source_dir, target_chat, recursive}` entries, each routing one local
+directory (optionally scanned recursively) to one destination chat. Files
+within a job are sent in batches of up to 10 as Telegram media groups
+(albums), with a pause between batches to stay within API rate limits.
+
+```yaml
+upload_jobs:
+  - source_dir: uploads/photos_channel
+    target_chat: "@some_public_channel"
+    recursive: false
+  - source_dir: uploads/docs_archive
+    target_chat: -1001234567890
+    recursive: true
+```
 
 See `config/channels.example.yaml` for a fuller, annotated set of examples
 covering each common use case (plain archive, documents-only, raw audio
@@ -226,10 +238,10 @@ python -m src.main --mode upload      # upload mode
 On first run you'll be prompted (via the `rich`-rendered UI) for the Telegram
 login code; after that, `data/downloader.session` keeps you logged in.
 
-Upload mode requires `upload_target_channel` to be set in
-`config/channels.yaml`; it scans `upload_source_directory` (default
-`uploads/`, non-recursively) and sends each file there to that chat as a
-document.
+Upload mode requires at least one entry in `upload_jobs` (see
+"Configuration" above); it scans each job's `source_dir` and sends its
+files to that job's `target_chat`, batched into media groups of up to 10
+files with a pause between batches to stay within Telegram's rate limits.
 
 ---
 

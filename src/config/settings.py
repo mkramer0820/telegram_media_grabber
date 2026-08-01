@@ -78,6 +78,24 @@ class ChannelConfig(BaseModel):
         return self
 
 
+class UploadJobConfig(BaseModel):
+    """A single upload target declared in `config/channels.yaml`'s `upload_jobs` list.
+
+    Multiple jobs let upload mode route different local directories to
+    different Telegram chats in one run (e.g. one folder per destination
+    channel), optionally scanning each directory's subfolders too.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_dir: Path = Field(..., description="Local directory scanned for files to upload.")
+    target_chat: int | str = Field(..., description="Destination chat ID or @username.")
+    recursive: bool = Field(
+        default=False,
+        description="If true, scan source_dir and all its subdirectories for files.",
+    )
+
+
 class ChannelsFile(BaseModel):
     """Schema of the top-level `config/channels.yaml` document."""
 
@@ -86,13 +104,9 @@ class ChannelsFile(BaseModel):
     download_root: Path = Field(default=Path("downloads"))
     max_concurrent_downloads: int = Field(default=5, ge=1, le=50)
     channels: list[ChannelConfig] = Field(default_factory=list)
-    upload_target_channel: int | str | None = Field(
-        default=None,
-        description="Chat ID or @username that upload mode sends files to.",
-    )
-    upload_source_directory: Path = Field(
-        default=Path("uploads"),
-        description="Local directory scanned for files to upload in upload mode.",
+    upload_jobs: list[UploadJobConfig] = Field(
+        default_factory=list,
+        description="Upload targets for upload mode; each maps a source_dir to a target_chat.",
     )
 
 

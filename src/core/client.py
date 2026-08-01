@@ -32,6 +32,11 @@ logger = logging.getLogger(__name__)
 _MAX_FLOOD_WAIT_RETRIES = 5
 _FLOOD_WAIT_BUFFER_SECONDS = 2.0
 
+# Telegram's hard limit on files per media group (album) message. Not an
+# internal tuning knob — callers (src.uploader.worker) must chunk larger
+# queues into batches of at most this size.
+MEDIA_GROUP_MAX_SIZE = 10
+
 try:
     import cryptg  # noqa: F401
 
@@ -243,6 +248,78 @@ async def upload_document(
                 "FloodWaitError uploading %s: sleeping %.1fs "
                 "(server=%ss + %.1fs buffer, attempt %d/%d)",
                 file_path, wait_seconds, exc.seconds,
+                _FLOOD_WAIT_BUFFER_SECONDS, flood_attempt, _MAX_FLOOD_WAIT_RETRIES,
+            )
+            await asyncio.sleep(wait_seconds)
+            if flood_attempt >= _MAX_FLOOD_WAIT_RETRIES:
+                raise
+
+
+async def upload_media_group(
+    client: TelegramClient,
+    chat_id: int | str,
+    file_paths: list[Path],
+    caption: str = "",
+    progress_callback: Callable[[int, int], None] | None = None,
+) -> list[Message]:
+    """Upload up to `MEDIA_GROUP_MAX_SIZE` files as one Telegram album.
+
+    API shielding: grouping files into a single album message costs one
+    `SendMultiMediaRequest` regardless of how many files are in it, versus
+    one request per file with `upload_document` — fewer requests per file
+    sent means fewer opportunities to trip Telegram's per-request rate
+    limits. `FloodWaitError` retries the same way `upload_document` does
+    (CLAUDE.md Section 4.6).
+
+    Args:
+        client: A connected, authenticated `TelegramClient`.
+        chat_id: Destination chat ID, "@username", or invite link/hash
+            (resolved via `resolve_entity`).
+        file_paths: Files to send as one album, in send order. Must be
+            non-empty and at most `MEDIA_GROUP_MAX_SIZE` long — callers are
+            responsible for chunking a larger queue (see
+            `src.uploader.worker.UploaderWorker`).
+        caption: Optional caption applied to the album.
+        progress_callback: Optional `(bytes_done, bytes_total)` callback
+            invoked as the combined batch streams.
+
+    Returns:
+        The `Message`s Telethon returns for the sent album, one per file,
+        in the same order as `file_paths`.
+
+    Raises:
+        ValueError: If `file_paths` is empty or longer than `MEDIA_GROUP_MAX_SIZE`.
+        FloodWaitError: If still rate-limited after `_MAX_FLOOD_WAIT_RETRIES`
+            attempts.
+    """
+    if not file_paths:
+        raise ValueError("upload_media_group requires at least one file.")
+    if len(file_paths) > MEDIA_GROUP_MAX_SIZE:
+        raise ValueError(
+            f"upload_media_group supports at most {MEDIA_GROUP_MAX_SIZE} files "
+            f"per batch (Telegram's album limit); got {len(file_paths)}."
+        )
+
+    entity = await resolve_entity(client, chat_id)
+
+    flood_attempt = 0
+    while True:
+        try:
+            result = await client.send_file(
+                entity,
+                [str(path) for path in file_paths],
+                caption=caption,
+                force_document=True,
+                progress_callback=progress_callback,
+            )
+            return list(result) if isinstance(result, list) else [result]
+        except FloodWaitError as exc:
+            flood_attempt += 1
+            wait_seconds = float(exc.seconds) + _FLOOD_WAIT_BUFFER_SECONDS
+            logger.warning(
+                "FloodWaitError uploading media group (%d files): sleeping %.1fs "
+                "(server=%ss + %.1fs buffer, attempt %d/%d)",
+                len(file_paths), wait_seconds, exc.seconds,
                 _FLOOD_WAIT_BUFFER_SECONDS, flood_attempt, _MAX_FLOOD_WAIT_RETRIES,
             )
             await asyncio.sleep(wait_seconds)

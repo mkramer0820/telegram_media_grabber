@@ -116,18 +116,45 @@ def test_audiobook_metadata_rejects_misplaced_min_date() -> None:
         )
 
 
-def test_channels_file_defaults_upload_settings_when_omitted() -> None:
+def test_channels_file_defaults_upload_jobs_to_empty_when_omitted() -> None:
     channels_file = ChannelsFile.model_validate({})
-    assert channels_file.upload_target_channel is None
-    assert channels_file.upload_source_directory == Path("uploads")
+    assert channels_file.upload_jobs == []
 
 
-def test_channels_file_parses_upload_settings() -> None:
+def test_channels_file_parses_upload_jobs() -> None:
     channels_file = ChannelsFile.model_validate(
-        {"upload_target_channel": "@some_channel", "upload_source_directory": "my_uploads"}
+        {
+            "upload_jobs": [
+                {"source_dir": "my_uploads", "target_chat": "@some_channel"},
+                {"source_dir": "docs", "target_chat": -1001234567890, "recursive": True},
+            ]
+        }
     )
-    assert channels_file.upload_target_channel == "@some_channel"
-    assert channels_file.upload_source_directory == Path("my_uploads")
+    assert len(channels_file.upload_jobs) == 2
+
+    first = channels_file.upload_jobs[0]
+    assert first.source_dir == Path("my_uploads")
+    assert first.target_chat == "@some_channel"
+    assert first.recursive is False
+
+    second = channels_file.upload_jobs[1]
+    assert second.source_dir == Path("docs")
+    assert second.target_chat == -1001234567890
+    assert second.recursive is True
+
+
+def test_upload_job_config_rejects_unknown_field_typo() -> None:
+    with pytest.raises(ValidationError):
+        ChannelsFile.model_validate(
+            {"upload_jobs": [{"source_dir": "x", "target_chat": "@x", "recuresive": True}]}
+        )
+
+
+def test_upload_job_config_requires_source_dir_and_target_chat() -> None:
+    with pytest.raises(ValidationError):
+        ChannelsFile.model_validate({"upload_jobs": [{"source_dir": "x"}]})
+    with pytest.raises(ValidationError):
+        ChannelsFile.model_validate({"upload_jobs": [{"target_chat": "@x"}]})
 
 
 def test_channels_file_rejects_unknown_top_level_field() -> None:
