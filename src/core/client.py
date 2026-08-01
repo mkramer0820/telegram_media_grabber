@@ -8,14 +8,16 @@ subsequent run connects without prompting for a login code.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from rich.console import Console
 from telethon import TelegramClient
-from telethon.errors import SessionPasswordNeededError
+from telethon.errors import FloodWaitError, SessionPasswordNeededError
+from telethon.tl.custom.message import Message
 from telethon.tl.functions.messages import CheckChatInviteRequest
 from telethon.tl.types import ChatInviteAlready, ChatInvitePeek
 
@@ -23,6 +25,12 @@ from src.config.settings import Settings
 from src.core.exceptions import AuthenticationError
 
 logger = logging.getLogger(__name__)
+
+# Mirrors the downloader's FloodWaitError policy (src/downloader/worker.py):
+# always sleep for exactly the server-specified duration plus a fixed safety
+# buffer, capped at a bounded number of attempts (CLAUDE.md Section 4.6).
+_MAX_FLOOD_WAIT_RETRIES = 5
+_FLOOD_WAIT_BUFFER_SECONDS = 2.0
 
 try:
     import cryptg  # noqa: F401
@@ -180,3 +188,63 @@ async def connect_and_authenticate(client: TelegramClient, settings: Settings, c
         raise AuthenticationError(f"Failed to authenticate with Telegram: {exc}") from exc
 
     logger.info("Telegram authentication successful; session saved to %s.session", settings.tg_session_name)
+
+
+async def upload_document(
+    client: TelegramClient,
+    chat_id: int | str,
+    file_path: Path,
+    caption: str = "",
+    progress_callback: Callable[[int, int], None] | None = None,
+) -> Message:
+    """Upload a local file to a Telegram chat as a document.
+
+    Wraps `TelegramClient.send_file` with `force_document=True` so media
+    (photos/videos) is sent unmodified rather than re-encoded/compressed by
+    Telegram's client-side handling of those types. `FloodWaitError` is
+    retried the same way the downloader retries it (`_download_with_retries`
+    in `src/downloader/worker.py`): sleep for exactly the server-specified
+    duration plus a fixed safety buffer, up to `_MAX_FLOOD_WAIT_RETRIES`
+    attempts, never a growing multiple (CLAUDE.md Section 4.6).
+
+    Args:
+        client: A connected, authenticated `TelegramClient`.
+        chat_id: Destination chat ID, "@username", or invite link/hash
+            (resolved via `resolve_entity`).
+        file_path: Local path of the file to upload.
+        caption: Optional caption attached to the uploaded document.
+        progress_callback: Optional `(bytes_done, bytes_total)` callback
+            invoked as the upload streams.
+
+    Returns:
+        The `Message` Telethon returns for the sent document.
+
+    Raises:
+        FloodWaitError: If still rate-limited after `_MAX_FLOOD_WAIT_RETRIES`
+            attempts.
+    """
+    entity = await resolve_entity(client, chat_id)
+
+    flood_attempt = 0
+    while True:
+        try:
+            message = await client.send_file(
+                entity,
+                str(file_path),
+                caption=caption,
+                force_document=True,
+                progress_callback=progress_callback,
+            )
+            return message
+        except FloodWaitError as exc:
+            flood_attempt += 1
+            wait_seconds = float(exc.seconds) + _FLOOD_WAIT_BUFFER_SECONDS
+            logger.warning(
+                "FloodWaitError uploading %s: sleeping %.1fs "
+                "(server=%ss + %.1fs buffer, attempt %d/%d)",
+                file_path, wait_seconds, exc.seconds,
+                _FLOOD_WAIT_BUFFER_SECONDS, flood_attempt, _MAX_FLOOD_WAIT_RETRIES,
+            )
+            await asyncio.sleep(wait_seconds)
+            if flood_attempt >= _MAX_FLOOD_WAIT_RETRIES:
+                raise

@@ -89,6 +89,10 @@ channels:
       novel_title: "Shadow Slave"
 ```
 
+`upload_target_channel` (chat ID or `@username`) and `upload_source_directory`
+(default `uploads`) configure upload mode (see "Running" below) — files
+placed in that directory are uploaded to that chat.
+
 See `config/channels.example.yaml` for a fuller, annotated set of examples
 covering each common use case (plain archive, documents-only, raw audio
 with no post-processing, single and multi-book `audiobook_mode`) plus a
@@ -148,17 +152,26 @@ telegram_media_grabber/
 │   │   ├── filenames.py             # Centralized filename sanitization
 │   │   ├── dedup.py                 # Dedup key computation / collision handling
 │   │   └── audiobook_processor.py   # audiobook_mode tagging + relocation
+│   ├── uploader/
+│   │   ├── __init__.py
+│   │   └── worker.py            # UploaderWorker: scans a dir, uploads to a chat
 │   ├── storage/
 │   │   ├── __init__.py
 │   │   └── state.py            # SQLite schema + last-message-id tracking
 │   └── ui/
 │       ├── __init__.py
-│       ├── dashboard.py        # rich Live dashboard (progress, throughput, logs)
+│       ├── dashboard.py        # rich Live dashboard for download mode
+│       ├── upload_dashboard.py # rich Live dashboard for upload mode
 │       └── logging_config.py   # Rotating file handler setup (no stdout handler)
+├── uploads/                    # Default upload source dir (gitignored)
+├── Dockerfile
+├── docker-compose.yml
+├── .dockerignore
 └── tests/
     ├── config/
     ├── core/
     ├── downloader/
+    ├── uploader/
     ├── storage/
     └── ui/
 ```
@@ -206,11 +219,43 @@ constraint so re-scans are naturally idempotent.
 ```bash
 pip install -r requirements.txt
 cp .env.example .env          # fill in TG_API_ID / TG_API_HASH / TG_PHONE
-python -m src.main
+python -m src.main                    # download mode (default)
+python -m src.main --mode upload      # upload mode
 ```
 
 On first run you'll be prompted (via the `rich`-rendered UI) for the Telegram
 login code; after that, `data/downloader.session` keeps you logged in.
+
+Upload mode requires `upload_target_channel` to be set in
+`config/channels.yaml`; it scans `upload_source_directory` (default
+`uploads/`, non-recursively) and sends each file there to that chat as a
+document.
+
+---
+
+## Running with Docker
+
+```bash
+cp .env.example .env          # fill in TG_API_ID / TG_API_HASH / TG_PHONE
+cp config/channels.example.yaml config/channels.yaml   # then edit it
+docker compose up -d
+```
+
+This builds the image, mounts `./config`, `./data`, `./logs`, `./downloads`,
+and `./uploads` into the container so state/output survive restarts, and
+starts the app in download mode. To run upload mode instead, override the
+command:
+
+```bash
+docker compose run --rm telegram-media-grabber --mode upload
+```
+
+The first run needs the interactive Telegram login — attach to the
+container's logs to enter the code:
+
+```bash
+docker compose logs -f
+```
 
 ---
 

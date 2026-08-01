@@ -2,6 +2,7 @@
 data/
 logs/
 downloads/
+uploads/
 __pycache__/
 *.pyc
 .mypy_cache/

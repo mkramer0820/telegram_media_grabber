@@ -86,6 +86,14 @@ class ChannelsFile(BaseModel):
     download_root: Path = Field(default=Path("downloads"))
     max_concurrent_downloads: int = Field(default=5, ge=1, le=50)
     channels: list[ChannelConfig] = Field(default_factory=list)
+    upload_target_channel: int | str | None = Field(
+        default=None,
+        description="Chat ID or @username that upload mode sends files to.",
+    )
+    upload_source_directory: Path = Field(
+        default=Path("uploads"),
+        description="Local directory scanned for files to upload in upload mode.",
+    )
 
 
 class Settings(BaseSettings):

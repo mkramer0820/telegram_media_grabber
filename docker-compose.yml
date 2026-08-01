@@ -1,0 +1,17 @@
+services:
+  telegram-media-grabber:
+    build: .
+    container_name: telegram_media_grabber
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      TG_SESSION_NAME: ${TG_SESSION_NAME:-data/downloader}
+      AUDIOBOOKS_DEST_DIR: ${AUDIOBOOKS_DEST_DIR:-downloads/Audiobooks}
+    volumes:
+      - ./config:/app/config
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./downloads:/app/downloads
+      - ./uploads:/app/uploads
+    command: ["--mode", "download"]

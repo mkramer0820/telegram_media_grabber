@@ -7,6 +7,11 @@
 download_root: downloads          # base dir for non-audiobook output_subdirs
 max_concurrent_downloads: 5       # 1-50; shared semaphore across ALL channels
 
+# Upload mode (`python -m src.main --mode upload`) settings. Both are
+# optional; upload_target_channel must be set before upload mode can run.
+upload_target_channel: "@some_public_channel"  # numeric chat ID also works
+upload_source_directory: uploads               # local dir scanned for files to send
+
 channels:
 
   # --- Use case 1: "grab everything" archive channel -----------------------
@@ -75,3 +80,8 @@ channels:
 #
 # NOTE: `min_date` is accepted by the schema but is not yet enforced by the
 # downloader (no messages are filtered by date today) — don't rely on it.
+#
+# upload_target_channel   (optional*) *Required to run upload mode. Chat ID
+#                                      or "@username" files are sent to.
+# upload_source_directory (optional)  Default "uploads". Local dir scanned
+#                                      (non-recursively) for files to send.

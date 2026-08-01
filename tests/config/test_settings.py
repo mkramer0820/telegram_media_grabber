@@ -116,6 +116,20 @@ def test_audiobook_metadata_rejects_misplaced_min_date() -> None:
         )
 
 
+def test_channels_file_defaults_upload_settings_when_omitted() -> None:
+    channels_file = ChannelsFile.model_validate({})
+    assert channels_file.upload_target_channel is None
+    assert channels_file.upload_source_directory == Path("uploads")
+
+
+def test_channels_file_parses_upload_settings() -> None:
+    channels_file = ChannelsFile.model_validate(
+        {"upload_target_channel": "@some_channel", "upload_source_directory": "my_uploads"}
+    )
+    assert channels_file.upload_target_channel == "@some_channel"
+    assert channels_file.upload_source_directory == Path("my_uploads")
+
+
 def test_channels_file_rejects_unknown_top_level_field() -> None:
     with pytest.raises(ValidationError):
         ChannelsFile.model_validate({"donwload_root": "downloads"})  # typo'd key
