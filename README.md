@@ -115,9 +115,9 @@ Settings are loaded and validated by `src/config/settings.py` using
 supplies the channel list, and both are merged into one immutable `Settings`
 object at startup.
 
-> **Known gap:** `ChannelConfig` also accepts an optional `min_date` field,
-> but the downloader doesn't enforce it yet — no messages are currently
-> filtered by date. Don't rely on it until this is implemented.
+`ChannelConfig.min_date` (ISO-8601) is enforced: messages are scanned
+newest-first, and scanning stops for a channel once a message older than
+`min_date` is reached.
 
 **`audiobook_mode` channels** are post-processed by
 `src/downloader/audiobook_processor.py` immediately after each chapter's
