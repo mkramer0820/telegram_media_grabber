@@ -19,8 +19,10 @@ A CLI tool that bulk-downloads media from Telegram channels/chats and
 `rich`-based terminal UI. Single `asyncio` event loop, SQLite for durable
 state, YAML + `.env` for configuration.
 
-Two run modes, one process: `python -m src.main --mode download` (default)
-or `--mode upload`.
+Four run modes, one process: `python -m src.main --mode download` (default),
+`--mode upload`, `--mode reprocess` (offline audiobook staging repair), or
+`--mode verify` (online audiobook episode-number re-verification against
+Telegram).
 
 ## 2. Status: what's implemented vs. not
 
@@ -43,6 +45,22 @@ Implemented and working (all covered by `mypy --strict` + pytest):
   `source_dir` (optionally recursive) to a `target_chat`; upload dedup via
   a fast filename+size+first-1MiB-hash key, scoped per target chat.
 - Docker: `Dockerfile`, `docker-compose.yml`, `.dockerignore`.
+- Audiobook episode-number extraction from the raw filename itself (a bare
+  number like "1114", or a range like "5-6" — uses the start), never from
+  Telegram's message ID. The message ID is only used as a last-resort
+  fallback (`infer_next_episode_number`: highest existing "Ep n" in the
+  destination directory + 1) when the filename has no number at all.
+- `--mode reprocess` (offline): finds `audiobook_mode` files that were
+  downloaded but never tagged/relocated out of staging (e.g. because
+  `audiobook_mode` was enabled after they were already downloaded — dedup
+  is keyed on `(chat_id, message_id)`, so such files are never retried by a
+  normal download run) and fixes them.
+- `--mode verify` (online, one batched `get_messages` request per channel):
+  re-derives each already-tagged file's true episode number straight from
+  Telegram's raw document filename and corrects any mismatch — the
+  belt-and-suspenders fix for files mistagged *before* the bare-numeric
+  filename support above existed, back when message-ID fallback was the
+  only option.
 
 Known gaps:
 - No cross-run resume for *uploads* beyond the dedup-key check (no partial
@@ -51,6 +69,10 @@ Known gaps:
   run, which is safe but not "resumed" in a finer-grained sense).
 - No `.m4b` concatenation for audiobooks (chapters stay individual files by
   design, not an oversight).
+- `--mode reprocess` and `--mode verify` process files sequentially, not
+  concurrently — fine at the scale this project runs at (tens to low
+  hundreds of files per channel), but worth knowing if a port adds
+  concurrency here without a reason to.
 
 ## 3. Architecture
 
@@ -76,8 +98,15 @@ src/
 │   │                          without going through this first.
 │   ├── dedup.py               message_dedup_key, hash_file (full SHA-256,
 │   │                          used post-download for cross-message dedup).
-│   └── audiobook_processor.py Episode/subtitle regex extraction, ID3/MP4
-│                              tagging via mutagen, shutil.move relocation.
+│   ├── audiobook_processor.py Episode/subtitle regex extraction, ID3/MP4
+│   │                          tagging via mutagen, shutil.move relocation.
+│   │                          apply_episode_tagging: tag+move using an
+│   │                          EXPLICITLY-given EpisodeInfo (doesn't re-derive
+│   │                          from the file's current name) — the primitive
+│   │                          both process_audiobook_file and
+│   │                          episode_verifier build on.
+│   ├── reprocessor.py         --mode reprocess (offline): AudiobookReprocessor.
+│   └── episode_verifier.py    --mode verify (online): EpisodeVerifier.
 ├── uploader/
 │   ├── worker.py              UploaderWorker: multi-job directory scan,
 │   │                          media-group batching (<=10 files/batch),
@@ -99,10 +128,10 @@ Dependency direction (enforced, checked by review — see `CLAUDE.md`):
 `Protocol` callback interfaces (`ProgressReporter`,
 `UploadProgressReporter`), not direct imports.
 
-Rough size (as of last count): ~2,200 lines across `src/`, largest file
-`downloader/worker.py` at 385 lines. No file near the project's own
-400-line split threshold except that one, which is borderline by design
-(it's the most state-machine-heavy module).
+Rough size (as of last count): ~2,900 lines across `src/`. Largest files:
+`downloader/worker.py` (391) and `downloader/audiobook_processor.py` (379),
+both close to the project's own 400-line split threshold by design (the
+most state-machine-heavy modules).
 
 ## 4. Data model (SQLite, `data/state.db`)
 
@@ -121,6 +150,16 @@ writing concurrently. A C# port should preserve this "single writer,
 explicit serialization" model (e.g. a single `SqliteConnection` behind a
 `SemaphoreSlim(1,1)`, or a dedicated writer channel/actor) rather than
 relying on SQLite's own locking, to keep the same crash-safety guarantees.
+
+No schema change was needed to support `--mode reprocess`/`--mode verify` —
+both are state *repair* operations built on three extra `StateStore`
+methods over the existing `downloaded_files` table:
+`list_downloaded_records(chat_id)`, `find_downloaded_record_by_path(path)`,
+and `update_downloaded_file_path(chat_id, message_id, path, hash)`. The
+last one is deliberately named distinctly from `record_downloaded_file`
+(which never overwrites, per the dedup rule below) — it exists solely for
+these two repair modes to correct a row after finishing a post-processing
+step that didn't complete the first time.
 
 ## 5. Key algorithms / invariants worth preserving exactly
 
@@ -170,11 +209,29 @@ porting it.
   `Path.rglob("*")` vs `Path.iterdir()`, filtered to `is_file()`, sorted for
   deterministic order. Missing `source_dir` yields zero items for that job,
   not an error (normal "nothing to upload yet" state).
-- **Audiobook tagging** (`downloader/audiobook_processor.py`): regex-based
-  episode/subtitle extraction with a specific "trailing uploader tag"
-  peel-off rule (see the two regex comments — the space-before-hyphen
-  distinction is load-bearing, don't simplify it away). `shutil.move`, not
-  `os.rename`, specifically to survive cross-filesystem moves (`EXDEV`).
+- **Audiobook episode extraction** (`downloader/audiobook_processor.py::extract_episode_info`):
+  tries "Ep <n> - <subtitle>" first (with a specific "trailing uploader
+  tag" peel-off rule — see the two regex comments, the space-before-hyphen
+  distinction is load-bearing, don't simplify it away), then a bare
+  number/range as the *entire* filename stem (e.g. "1114" or "5-6", using
+  the range's start). Returns `None`, not a guess, when neither matches —
+  `process_audiobook_file` only then falls back to
+  `infer_next_episode_number` (highest existing "Ep n" in the destination
+  dir + 1). The Telegram message ID is *never* used as an episode number —
+  it's an arbitrary ID shared across the whole chat, unrelated to the
+  show's own numbering; an earlier version of this code did use it as the
+  fallback, which is why `--mode verify` (§2) exists at all.
+- **`apply_episode_tagging` vs. `process_audiobook_file`**: the former
+  tags+moves using an *explicitly-given* `EpisodeInfo`, never re-deriving
+  it from `file_path`'s current name. This split matters — a file being
+  corrected already has the wrong "Ep <n>" baked into its current
+  filename, which `extract_episode_info` would happily re-match if given
+  the chance. `process_audiobook_file` (the normal per-download path)
+  derives `info` from the source's raw filename and calls
+  `apply_episode_tagging`; `episode_verifier` derives `info` from
+  Telegram's message instead and calls the same primitive.
+- `shutil.move`, not `os.rename`, specifically to survive cross-filesystem
+  relocation (`EXDEV`) in both of the above.
 
 ## 6. External dependencies and their likely C# counterparts
 
@@ -232,7 +289,7 @@ typing** for Telethon objects rather than a mocking framework or live
 network calls (`FakeClient`, `FakeMessage`, `FakeDocumentAttribute`, etc. —
 see `tests/downloader/test_worker.py` for the fullest example). Real
 `StateStore` instances against `tmp_path` SQLite files, not mocked. This
-kept the whole suite at ~2 seconds for 116 tests with zero flakiness from
+kept the whole suite at ~2-3 seconds for 146 tests with zero flakiness from
 mocking mismatches. A C# port should use the equivalent (hand-written test
 doubles implementing the same interfaces, or `WTelegramClient`'s own
 test-friendly seams if it has them) over a heavy mocking framework, for the
@@ -287,8 +344,6 @@ are easy to forget when reading only the implementation.
 
 This file is a snapshot, not a live contract. Before treating any claim
 above as ground truth for the port:
-- Re-check `min_date` enforcement status (§2) directly in
-  `src/downloader/worker.py`.
 - Re-run `git log --oneline` and diff against this file's "last updated"
   commit to see what's changed since.
 - Re-run `pytest -q` and `mypy --strict src` to confirm the "clean" claims

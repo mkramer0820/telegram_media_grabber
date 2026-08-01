@@ -122,13 +122,21 @@ newest-first, and scanning stops for a channel once a message older than
 **`audiobook_mode` channels** are post-processed by
 `src/downloader/audiobook_processor.py` immediately after each chapter's
 atomic download completes: the episode number and subtitle are parsed from
-the filename (falling back to the Telegram message ID), ID3/MP4 tags
+the filename — either "Ep &lt;n&gt; - &lt;subtitle&gt;", or a bare number/range like
+"1114" or "5-6" — never from the Telegram message ID. If the filename has
+no parsable number at all, the next episode number is inferred from the
+highest "Ep n" already in the destination directory, plus one. ID3/MP4 tags
 (Artist, Album, Title, Track) are embedded via `mutagen`, and the file is
 moved — via `shutil.move`, safe across filesystem boundaries — into
 `{AUDIOBOOKS_DEST_DIR}/{author}/{novel_title}/`. `audiobook_mode: true`
 requires a `metadata` block (`author` + `novel_title`); config loading fails
 fast if it's missing. Chapters are kept as individual files — there is no
 `ffmpeg` dependency or `.m4b` concatenation step.
+
+If a channel was downloaded with `audiobook_mode` off (or before this
+episode-number logic existed) and files are stuck in staging or tagged with
+the wrong number, see `--mode reprocess` and `--mode verify` under
+"Running" below.
 
 ---
 
@@ -163,7 +171,9 @@ telegram_media_grabber/
 │   │   ├── worker.py                # Async download workers, semaphore-bounded
 │   │   ├── filenames.py             # Centralized filename sanitization
 │   │   ├── dedup.py                 # Dedup key computation / collision handling
-│   │   └── audiobook_processor.py   # audiobook_mode tagging + relocation
+│   │   ├── audiobook_processor.py   # audiobook_mode tagging + relocation
+│   │   ├── reprocessor.py           # --mode reprocess: fixes files stuck in staging
+│   │   └── episode_verifier.py      # --mode verify: re-checks episode numbers vs Telegram
 │   ├── uploader/
 │   │   ├── __init__.py
 │   │   └── worker.py            # UploaderWorker: scans a dir, uploads to a chat
@@ -233,6 +243,8 @@ pip install -r requirements.txt
 cp .env.example .env          # fill in TG_API_ID / TG_API_HASH / TG_PHONE
 python -m src.main                    # download mode (default)
 python -m src.main --mode upload      # upload mode
+python -m src.main --mode reprocess   # fix audiobook files stuck in staging
+python -m src.main --mode verify      # re-check tagged episode numbers against Telegram
 ```
 
 On first run you'll be prompted (via the `rich`-rendered UI) for the Telegram
@@ -242,6 +254,24 @@ Upload mode requires at least one entry in `upload_jobs` (see
 "Configuration" above); it scans each job's `source_dir` and sends its
 files to that job's `target_chat`, batched into media groups of up to 10
 files with a pause between batches to stay within Telegram's rate limits.
+
+Reprocess mode is fully offline (no Telegram connection): for every
+`audiobook_mode` channel, it scans `download_root/{output_subdir}` for
+files that were downloaded but never tagged and moved into
+`AUDIOBOOKS_DEST_DIR` (e.g. because `audiobook_mode` was turned on after
+they were downloaded), tags and relocates them, and corrects their
+`downloaded_files` state record. Safe to run repeatedly — once a file is
+moved out of staging there's nothing left for it to find.
+
+Verify mode is online (one batched `get_messages` request per channel): for
+every `audiobook_mode` channel, it re-fetches each already-tagged file's
+source message and re-derives its episode number from Telegram's raw
+document filename via `extract_episode_info`. If that disagrees with what's
+currently on disk — e.g. a file tagged before bare-numeric-filename support
+existed, back when the only fallback was Telegram's message ID — it re-tags
+and relocates the file to its true episode number and corrects the state
+record. Safe to run repeatedly; files that are already correct are left
+untouched.
 
 ---
 

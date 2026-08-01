@@ -155,8 +155,14 @@ def _parse_min_date(min_date: str | None) -> datetime | None:
     return datetime.fromisoformat(min_date).replace(tzinfo=timezone.utc)
 
 
-def _derive_filename(message: Message) -> str:
-    """Best-effort filename for a message's media, before sanitization."""
+def derive_filename(message: Message) -> str:
+    """Best-effort filename for a message's media, before sanitization.
+
+    Public (not `_`-prefixed) because `src.downloader.episode_verifier`
+    also needs it — to re-derive a message's true raw filename directly
+    from Telegram, independent of whatever a file was already tagged as
+    locally.
+    """
     if message.document is not None:
         for attribute in message.document.attributes:
             name = getattr(attribute, "file_name", None)
@@ -274,7 +280,7 @@ class DownloadManager:
         """
         chat_name = channel.name
         async with self._semaphore:
-            raw_name = _derive_filename(message)
+            raw_name = derive_filename(message)
             safe_name = sanitize_filename(raw_name)
             final_path = dedup_suffixed_path(output_dir / safe_name)
             tmp_path = final_path.with_suffix(final_path.suffix + ".tmp")

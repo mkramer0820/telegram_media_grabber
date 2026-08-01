@@ -17,6 +17,8 @@ from telethon import TelegramClient
 from src.config.settings import Settings, get_settings
 from src.core.client import build_client, connect_and_authenticate
 from src.core.exceptions import DownloaderError
+from src.downloader.episode_verifier import EpisodeVerifier, VerifySummary
+from src.downloader.reprocessor import AudiobookReprocessor
 from src.downloader.worker import DownloadManager
 from src.storage.state import StateStore
 from src.ui.dashboard import Dashboard
@@ -31,15 +33,21 @@ def _parse_args() -> argparse.Namespace:
     """Parse CLI arguments selecting the run mode.
 
     Returns:
-        Parsed arguments; `mode` is either `"download"` (default) or
-        `"upload"`.
+        Parsed arguments; `mode` is `"download"` (default), `"upload"`, or
+        `"reprocess"`.
     """
     parser = argparse.ArgumentParser(description="Telegram Batch Media Downloader/Uploader")
     parser.add_argument(
         "--mode",
-        choices=["download", "upload"],
+        choices=["download", "upload", "reprocess", "verify"],
         default="download",
-        help="Run in 'download' mode (default) or 'upload' mode.",
+        help=(
+            "Run in 'download' mode (default), 'upload' mode, 'reprocess' "
+            "mode (offline: tags/relocates audiobook_mode files stuck in "
+            "staging and fixes their state record), or 'verify' mode "
+            "(online: re-checks already-tagged audiobook_mode episode "
+            "numbers against Telegram and corrects mismatches)."
+        ),
     )
     return parser.parse_args()
 
@@ -98,16 +106,88 @@ async def _run_upload(settings: Settings, console: Console, client: TelegramClie
             await worker.process_queue()
 
 
+async def _run_reprocess(settings: Settings, console: Console) -> None:
+    """Tag/relocate audiobook_mode files stuck in staging and fix their state.
+
+    Fully offline: no Telegram connection is made. See
+    `src.downloader.reprocessor` for why a file ends up stuck and how this
+    is detected.
+
+    Args:
+        settings: Fully-loaded application settings (env + channels.yaml).
+        console: Shared `rich` console used for all terminal output.
+    """
+    channels = [
+        channel
+        for channel in settings.channels_file.channels
+        if channel.audiobook_mode and channel.metadata is not None
+    ]
+    if not channels:
+        console.print("[yellow]No audiobook_mode channels configured; nothing to reprocess.[/yellow]")
+        return
+
+    async with StateStore(settings.state_db_path) as state_store:
+        reprocessor = AudiobookReprocessor(
+            state_store=state_store,
+            download_root=settings.channels_file.download_root,
+            audiobooks_dest_dir=settings.audiobooks_dest_dir,
+        )
+        summary = await reprocessor.run(channels, console=console)
+
+    console.print(
+        f"[bold]Reprocessed {summary.processed}[/bold] file(s); "
+        f"{summary.skipped} skipped, {summary.errors} error(s)."
+    )
+
+
+async def _run_verify(settings: Settings, console: Console, client: TelegramClient) -> None:
+    """Cross-check audiobook_mode episode numbers against Telegram and correct mismatches.
+
+    Args:
+        settings: Fully-loaded application settings (env + channels.yaml).
+        console: Shared `rich` console used for all terminal output.
+        client: A connected, authenticated `TelegramClient`.
+    """
+    channels = [
+        channel
+        for channel in settings.channels_file.channels
+        if channel.audiobook_mode and channel.metadata is not None
+    ]
+    if not channels:
+        console.print("[yellow]No audiobook_mode channels configured; nothing to verify.[/yellow]")
+        return
+
+    async with StateStore(settings.state_db_path) as state_store:
+        verifier = EpisodeVerifier(
+            client=client, state_store=state_store, audiobooks_dest_dir=settings.audiobooks_dest_dir
+        )
+        totals = VerifySummary(checked=0, corrected=0, errors=0)
+        for channel in channels:
+            console.print(f"Verifying [bold]{channel.name}[/bold]...")
+            totals = totals + await verifier.run_channel(channel, console=console)
+
+    console.print(
+        f"[bold]Checked {totals.checked}[/bold] file(s); "
+        f"{totals.corrected} corrected, {totals.errors} error(s)."
+    )
+
+
 async def run(settings: Settings, console: Console, mode: str) -> None:
     """Run the application's main async workflow.
 
     Args:
         settings: Fully-loaded application settings (env + channels.yaml).
         console: Shared `rich` console used for all terminal output.
-        mode: Either `"download"` or `"upload"`, selecting which workflow
-            runs against the shared, already-authenticated client.
+        mode: `"download"`, `"upload"`, `"reprocess"`, or `"verify"` —
+            selects which workflow runs. `"reprocess"` never touches
+            Telegram, so it skips client construction/auth entirely.
     """
     console.print("[bold cyan]Telegram Batch Media Downloader/Uploader[/bold cyan]")
+
+    if mode == "reprocess":
+        await _run_reprocess(settings, console)
+        console.print("[bold green]Done.[/bold green]")
+        return
 
     client = build_client(settings)
     await connect_and_authenticate(client, settings, console)
@@ -115,6 +195,8 @@ async def run(settings: Settings, console: Console, mode: str) -> None:
     try:
         if mode == "upload":
             await _run_upload(settings, console, client)
+        elif mode == "verify":
+            await _run_verify(settings, console, client)
         else:
             await _run_download(settings, console, client)
     finally:

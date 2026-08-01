@@ -4,10 +4,17 @@ Invoked by `src.downloader.worker` immediately after a chapter file's atomic
 `.tmp` -> final rename succeeds (CLAUDE.md Section 2.1/2.5 still apply up to
 that point). From there this module:
 
-  1. Extracts an episode/chapter number and optional subtitle from the raw
-     filename (regex-based; falls back to the Telegram message ID).
-  2. Embeds Artist/AlbumArtist/Album/Title/Track tags via `mutagen`.
-  3. Moves the file into `{dest_root}/{author}/{novel_title}/...` using
+  1. Extracts an episode/chapter number (and optional subtitle) from the raw
+     filename: either "Ep <n> - <subtitle>" or a bare number/range like
+     "1114" or "5-6". Author/novel_title always come from config
+     (`AudiobookMetadata`), never from the filename.
+  2. If the filename carries no parsable number at all, infers the next
+     episode number from what's already in the destination directory
+     (highest existing "Ep <n>" + 1) — never from the Telegram message ID,
+     which is an arbitrary ID shared across the whole chat and unrelated to
+     the show's own episode count.
+  3. Embeds Artist/AlbumArtist/Album/Title/Track tags via `mutagen`.
+  4. Moves the file into `{dest_root}/{author}/{novel_title}/...` using
      `shutil.move` (not `os.rename`/`Path.replace`) so relocating onto a
      different filesystem or network mount never raises `EXDEV`.
 
@@ -50,40 +57,112 @@ _EPISODE_PATTERN = re.compile(
 # text like "...Part 2" (space-separated) is left untouched.
 _TRAILING_UPLOADER_TAG_PATTERN = re.compile(r"^(?P<subtitle>.+?)-[A-Za-z0-9]+$")
 
+# Some channels post chapters named as just a number, or a number range for
+# a bundled multi-chapter file, e.g. "1114.m4a", "1114..m4a" (a trailing dot
+# survives in Path(...).stem when the raw filename itself has a double dot),
+# or "5-6.m4a". Requires the *entire* stem to be numeric (plus optional
+# trailing dots) so longer non-episode filenames that merely contain digits
+# still count as unparsed.
+_BARE_NUMERIC_STEM_PATTERN = re.compile(r"^(?P<start>\d+)(?:-(?P<end>\d+))?\.*$")
+
+# Scans an already-tagged destination filename (e.g. "Shadow Slave - Ep 0009
+# - Title.mp3") for its episode number, used only by
+# infer_next_episode_number's directory scan.
+_EXISTING_EPISODE_TAG_PATTERN = re.compile(r"\bEp\s*(?P<episode>\d+)\b", re.IGNORECASE)
+
 
 @dataclass(frozen=True, slots=True)
 class EpisodeInfo:
-    """Extracted (or fallback) episode identity for one chapter file."""
+    """A chapter's episode number and optional subtitle."""
 
     episode: int
     subtitle: str | None
 
 
-def extract_episode_info(raw_filename: str, fallback_episode: int) -> EpisodeInfo:
-    """Extract episode number and subtitle from a raw Telegram filename.
+def extract_episode_info(raw_filename: str) -> EpisodeInfo | None:
+    """Extract an episode number and subtitle from a raw Telegram filename.
+
+    Tries two patterns, in order:
+      1. "Ep <n> - <subtitle>" (or "Episode"/"ep."/colon separator) anywhere
+         in the filename stem.
+      2. A bare number or number range as the *entire* stem, e.g. "1114" or
+         "5-6" (range fallback uses the start number).
 
     Args:
         raw_filename: The original filename (with or without extension),
-            e.g. "__Shadow Slave.Ep 2027 - The Strength of the Wolf-XtreamStories.mp3".
-        fallback_episode: Used as the episode number when no `Ep <n>`-style
-            pattern is found (typically the Telegram message ID).
+            e.g. "__Shadow Slave.Ep 2027 - The Strength of the Wolf-XtreamStories.mp3"
+            or "1114.m4a".
 
     Returns:
-        An `EpisodeInfo` with the parsed episode number and subtitle (or
-        `None` subtitle if none could be isolated).
+        An `EpisodeInfo` if either pattern matched, otherwise `None` — the
+        caller decides what to do when no episode number is present in the
+        filename at all (see `infer_next_episode_number`).
     """
     stem = Path(raw_filename).stem
+
     match = _EPISODE_PATTERN.search(stem)
-    if match is None:
-        return EpisodeInfo(episode=fallback_episode, subtitle=None)
+    if match is not None:
+        episode = int(match.group("episode"))
+        rest = match.group("rest").strip()
+        tag_match = _TRAILING_UPLOADER_TAG_PATTERN.match(rest)
+        subtitle = tag_match.group("subtitle").strip() if tag_match else rest
+        return EpisodeInfo(episode=episode, subtitle=subtitle or None)
 
-    episode = int(match.group("episode"))
-    rest = match.group("rest").strip()
+    numeric_match = _BARE_NUMERIC_STEM_PATTERN.match(stem)
+    if numeric_match is not None:
+        return EpisodeInfo(episode=int(numeric_match.group("start")), subtitle=None)
 
-    tag_match = _TRAILING_UPLOADER_TAG_PATTERN.match(rest)
-    subtitle = tag_match.group("subtitle").strip() if tag_match else rest
+    return None
 
-    return EpisodeInfo(episode=episode, subtitle=subtitle or None)
+
+def parse_tagged_episode_number(path: Path) -> int | None:
+    """Return the episode number already encoded in a tagged filename, if any.
+
+    Looks for this app's own "... Ep <n> ..." naming (see
+    `build_destination_path`) in `path`'s stem — used both by
+    `infer_next_episode_number`'s directory scan and by
+    `src.downloader.episode_verifier` to compare a file's currently-tagged
+    number against the truth re-derived from Telegram.
+
+    Args:
+        path: A file possibly already named by this app.
+
+    Returns:
+        The parsed episode number, or `None` if the filename doesn't
+        contain a recognizable "Ep <n>" tag.
+    """
+    match = _EXISTING_EPISODE_TAG_PATTERN.search(path.stem)
+    return int(match.group("episode")) if match is not None else None
+
+
+def infer_next_episode_number(dest_dir: Path) -> int:
+    """Infer the next episode number from files already tagged in `dest_dir`.
+
+    Last-resort fallback for a chapter whose filename carries no parsable
+    episode number at all (`extract_episode_info` returned `None`). Scans
+    `dest_dir` for files this app has already named "... Ep <n> ..." and
+    returns one past the highest number found — a continuation of what's
+    actually on disk for this book, not an arbitrary Telegram message ID.
+
+    Args:
+        dest_dir: The book's destination directory
+            (`dest_root/{author}/{novel_title}`).
+
+    Returns:
+        `max(existing episode numbers) + 1`, or `1` if `dest_dir` doesn't
+        exist yet or has no recognizably-tagged files.
+    """
+    if not dest_dir.exists():
+        return 1
+
+    numbers = [
+        number
+        for path in dest_dir.iterdir()
+        if path.is_file()
+        for number in [parse_tagged_episode_number(path)]
+        if number is not None
+    ]
+    return max(numbers) + 1 if numbers else 1
 
 
 def format_title(novel_title: str, info: EpisodeInfo) -> str:
@@ -103,6 +182,24 @@ def format_title(novel_title: str, info: EpisodeInfo) -> str:
     return f"{novel_title} - Ep {info.episode}"
 
 
+def book_dir(dest_root: Path, metadata: AudiobookMetadata) -> Path:
+    """Return the book's destination directory: `dest_root/{author}/{novel_title}`.
+
+    Shared by `build_destination_path` and `infer_next_episode_number`'s
+    caller so both agree on exactly where a book's files live.
+
+    Args:
+        dest_root: Configured audiobook destination root.
+        metadata: Author/novel_title for this channel.
+
+    Returns:
+        The sanitized `dest_root/{author}/{novel_title}` directory path.
+    """
+    author_dir = sanitize_filename(metadata.author, fallback_stem="Unknown Author")
+    novel_dir = sanitize_filename(metadata.novel_title, fallback_stem="Unknown Title")
+    return dest_root / author_dir / novel_dir
+
+
 def build_destination_path(
     dest_root: Path, metadata: AudiobookMetadata, info: EpisodeInfo, suffix: str
 ) -> Path:
@@ -120,16 +217,13 @@ def build_destination_path(
         collision handling is the caller's responsibility, matching the
         existing `dedup_suffixed_path` convention used elsewhere).
     """
-    author_dir = sanitize_filename(metadata.author, fallback_stem="Unknown Author")
-    novel_dir = sanitize_filename(metadata.novel_title, fallback_stem="Unknown Title")
-
     if info.subtitle:
         base_name = f"{metadata.novel_title} - Ep {info.episode:04d} - {info.subtitle}{suffix}"
     else:
         base_name = f"{metadata.novel_title} - Ep {info.episode:04d}{suffix}"
     filename = sanitize_filename(base_name)
 
-    return dest_root / author_dir / novel_dir / filename
+    return book_dir(dest_root, metadata) / filename
 
 
 def _tag_mp3(path: Path, *, artist: str, album: str, title: str, episode: int) -> None:
@@ -202,6 +296,36 @@ def _tag_and_move(source: Path, destination: Path, metadata: AudiobookMetadata, 
     shutil.move(str(source), str(destination))
 
 
+async def apply_episode_tagging(
+    file_path: Path, info: EpisodeInfo, metadata: AudiobookMetadata, dest_root: Path
+) -> Path:
+    """Tag `file_path` in place and move it to the destination for `info`.
+
+    Unlike `process_audiobook_file`, this never derives `info` from
+    `file_path`'s own name — callers pass it explicitly. This is what makes
+    it safe for `src.downloader.episode_verifier` to use: correcting a
+    previously mistagged file means the file's *current* name already has
+    the wrong "Ep <n>" baked in (which `extract_episode_info` would happily
+    re-match), so the caller must supply the freshly-verified `info` instead.
+
+    Args:
+        file_path: Current on-disk location of the audio file to tag/move.
+        info: The episode identity to apply.
+        metadata: Author/novel_title for this channel.
+        dest_root: Configured audiobook destination root.
+
+    Returns:
+        The file's new path after tagging and relocation (dedup-suffixed
+        if the natural destination name is already taken by a different
+        file — CLAUDE.md Section 2.4: never overwrite).
+    """
+    destination = dedup_suffixed_path(
+        build_destination_path(dest_root, metadata, info, file_path.suffix)
+    )
+    await asyncio.to_thread(_tag_and_move, file_path, destination, metadata, info)
+    return destination
+
+
 async def process_audiobook_file(
     file_path: Path,
     message_id: int,
@@ -218,9 +342,11 @@ async def process_audiobook_file(
         file_path: Current on-disk location of the freshly-downloaded
             chapter file (its filename is used for episode/subtitle
             extraction; not required to be sanitized already).
-        message_id: Telegram message ID, used as the episode-number
-            fallback when no `Ep <n>` pattern is found in the filename.
-        metadata: Author/novel_title for this channel.
+        message_id: Telegram message ID. Only used for logging
+            traceability back to the source message — never as the episode
+            number (see `extract_episode_info`/`infer_next_episode_number`).
+        metadata: Author/novel_title for this channel (always from config,
+            never guessed from the filename).
         dest_root: Configured audiobook destination root.
 
     Returns:
@@ -233,14 +359,21 @@ async def process_audiobook_file(
     if file_path.suffix.lower() not in _TAGGABLE_EXTENSIONS:
         raise ValueError(f"Unsupported audiobook extension for tagging: {file_path.suffix}")
 
-    info = extract_episode_info(file_path.name, fallback_episode=message_id)
-    destination = dedup_suffixed_path(
-        build_destination_path(dest_root, metadata, info, file_path.suffix)
-    )
+    info = extract_episode_info(file_path.name)
+    if info is None:
+        next_episode = infer_next_episode_number(book_dir(dest_root, metadata))
+        info = EpisodeInfo(episode=next_episode, subtitle=None)
+        logger.warning(
+            "No episode number in filename %r (message_id=%d); inferring "
+            "episode %d from the highest existing episode in the "
+            "destination directory.",
+            file_path.name, message_id, next_episode,
+        )
+
+    destination = await apply_episode_tagging(file_path, info, metadata, dest_root)
 
     logger.info(
-        "Audiobook processing: %s -> %s (episode=%d, subtitle=%r)",
-        file_path, destination, info.episode, info.subtitle,
+        "Audiobook processing: %s -> %s (episode=%d, subtitle=%r, message_id=%d)",
+        file_path, destination, info.episode, info.subtitle, message_id,
     )
-    await asyncio.to_thread(_tag_and_move, file_path, destination, metadata, info)
     return destination

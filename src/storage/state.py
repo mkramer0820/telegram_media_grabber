@@ -141,6 +141,75 @@ class StateStore:
             )
             self._conn.commit()
 
+    async def list_downloaded_records(self, chat_id: int) -> list[tuple[int, Path]]:
+        """Return every recorded `(message_id, file_path)` for `chat_id`.
+
+        Used by `src.downloader.episode_verifier` to enumerate every
+        already-downloaded file for a channel so each can be cross-checked
+        against its source Telegram message.
+
+        Args:
+            chat_id: Telegram chat/channel ID.
+
+        Returns:
+            All recorded `(message_id, file_path)` pairs for `chat_id`, in
+            no particular order.
+        """
+        async with self._lock:
+            cursor = self._conn.execute(
+                "SELECT message_id, file_path FROM downloaded_files WHERE chat_id = ?",
+                (chat_id,),
+            )
+            return [(int(row[0]), Path(row[1])) for row in cursor.fetchall()]
+
+    async def find_downloaded_record_by_path(self, file_path: Path) -> tuple[int, int] | None:
+        """Return the `(chat_id, message_id)` recorded for `file_path`, if any.
+
+        Used to identify which downloaded message a file on disk belongs to
+        when the caller only has the path (e.g. `--mode reprocess` scanning
+        an `audiobook_mode` staging directory for files never tagged/moved).
+
+        Args:
+            file_path: The path exactly as recorded by `record_downloaded_file`.
+
+        Returns:
+            The matching `(chat_id, message_id)`, or `None` if no
+            `downloaded_files` row has this exact path.
+        """
+        async with self._lock:
+            cursor = self._conn.execute(
+                "SELECT chat_id, message_id FROM downloaded_files WHERE file_path = ?",
+                (str(file_path),),
+            )
+            row = cursor.fetchone()
+            return (int(row[0]), int(row[1])) if row is not None else None
+
+    async def update_downloaded_file_path(
+        self, chat_id: int, message_id: int, file_path: Path, content_hash: str | None = None
+    ) -> None:
+        """Correct the recorded location of an already-downloaded file.
+
+        This is a state-repair operation, not a general-purpose overwrite:
+        it exists solely for `--mode reprocess` to update a row after
+        finishing a post-processing step (audiobook tagging + relocation)
+        that didn't complete when the file was first downloaded. The row
+        for `(chat_id, message_id)` must already exist; this is a no-op if
+        it doesn't.
+
+        Args:
+            chat_id: Telegram chat/channel ID.
+            message_id: Source message ID.
+            file_path: The file's corrected, final on-disk path.
+            content_hash: Updated content hash for the relocated file.
+        """
+        async with self._lock:
+            self._conn.execute(
+                "UPDATE downloaded_files SET file_path = ?, content_hash = ? "
+                "WHERE chat_id = ? AND message_id = ?",
+                (str(file_path), content_hash, chat_id, message_id),
+            )
+            self._conn.commit()
+
     async def find_by_content_hash(self, content_hash: str) -> list[Path]:
         """Return file paths already stored under `content_hash`, if any."""
         async with self._lock:

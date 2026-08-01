@@ -60,6 +60,51 @@ async def test_record_downloaded_file_is_idempotent(db_path: Path) -> None:
         assert paths == [Path("downloads/file.mp4")]
 
 
+async def test_list_downloaded_records_returns_all_rows_for_chat(db_path: Path) -> None:
+    async with StateStore(db_path) as store:
+        await store.record_downloaded_file(1, 5, Path("a.mp4"))
+        await store.record_downloaded_file(1, 6, Path("b.mp4"))
+        await store.record_downloaded_file(2, 5, Path("other-chat.mp4"))
+
+        records = await store.list_downloaded_records(1)
+        assert set(records) == {(5, Path("a.mp4")), (6, Path("b.mp4"))}
+
+
+async def test_list_downloaded_records_empty_for_unknown_chat(db_path: Path) -> None:
+    async with StateStore(db_path) as store:
+        assert await store.list_downloaded_records(999) == []
+
+
+async def test_find_downloaded_record_by_path_returns_none_when_no_match(db_path: Path) -> None:
+    async with StateStore(db_path) as store:
+        assert await store.find_downloaded_record_by_path(Path("nope.mp4")) is None
+
+
+async def test_find_downloaded_record_by_path_returns_matching_ids(db_path: Path) -> None:
+    async with StateStore(db_path) as store:
+        await store.record_downloaded_file(1, 5, Path("staging/file.mp4"))
+        assert await store.find_downloaded_record_by_path(Path("staging/file.mp4")) == (1, 5)
+
+
+async def test_update_downloaded_file_path_corrects_path_and_hash(db_path: Path) -> None:
+    async with StateStore(db_path) as store:
+        await store.record_downloaded_file(1, 5, Path("staging/file.mp4"))
+
+        await store.update_downloaded_file_path(1, 5, Path("final/file.mp4"), "new-hash")
+
+        # Old path no longer resolves; new path does, and content dedup
+        # picks up the corrected hash.
+        assert await store.find_downloaded_record_by_path(Path("staging/file.mp4")) is None
+        assert await store.find_downloaded_record_by_path(Path("final/file.mp4")) == (1, 5)
+        assert await store.find_by_content_hash("new-hash") == [Path("final/file.mp4")]
+
+
+async def test_update_downloaded_file_path_is_noop_for_unknown_record(db_path: Path) -> None:
+    async with StateStore(db_path) as store:
+        # No matching (chat_id, message_id) row exists; must not raise.
+        await store.update_downloaded_file_path(999, 999, Path("wherever.mp4"))
+
+
 async def test_find_by_content_hash_returns_all_matches(db_path: Path) -> None:
     async with StateStore(db_path) as store:
         await store.record_downloaded_file(1, 1, Path("a.mp4"), "shared-hash")
