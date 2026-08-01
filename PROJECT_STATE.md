@@ -45,16 +45,22 @@ Implemented and working (all covered by `mypy --strict` + pytest):
   `source_dir` (optionally recursive) to a `target_chat`; upload dedup via
   a fast filename+size+first-1MiB-hash key, scoped per target chat.
 - Docker: `Dockerfile`, `docker-compose.yml`, `.dockerignore`.
-- Audiobook episode-number extraction from the raw filename itself (a bare
-  number like "1114", or a range like "5-6" — uses the start), never from
-  Telegram's message ID. The message ID is only used as a last-resort
-  fallback (`infer_next_episode_number`: highest existing "Ep n" in the
-  destination directory + 1) when the filename has no number at all.
+- Audiobook episode-number extraction from the raw filename itself — a
+  trailing bare number or range, either the whole stem or preceded by
+  whitespace (e.g. "1114", "5-6", or "Shadow Slave 1751-1846" — a range
+  uses its start number) — never from Telegram's message ID. If the
+  filename has no number at all, `infer_next_episode_number` (highest
+  existing "Ep n" in the destination directory + 1) is the fallback;
+  message ID is never part of the number in any path, only used for log
+  traceability.
 - `--mode reprocess` (offline): finds `audiobook_mode` files that were
-  downloaded but never tagged/relocated out of staging (e.g. because
-  `audiobook_mode` was enabled after they were already downloaded — dedup
-  is keyed on `(chat_id, message_id)`, so such files are never retried by a
-  normal download run) and fixes them.
+  downloaded but never tagged/relocated out of staging — either because
+  `audiobook_mode` was enabled after they were already downloaded (dedup
+  is keyed on `(chat_id, message_id)`, so such files are never retried by
+  a normal download run) or because they predate this app's state
+  tracking entirely (no `downloaded_files` row at all) — and fixes them.
+  Files with no matching state row are still tagged/relocated; only the
+  state-repair step is skipped for them.
 - `--mode verify` (online, one batched `get_messages` request per channel):
   re-derives each already-tagged file's true episode number straight from
   Telegram's raw document filename and corrects any mismatch — the
@@ -212,10 +218,13 @@ porting it.
 - **Audiobook episode extraction** (`downloader/audiobook_processor.py::extract_episode_info`):
   tries "Ep <n> - <subtitle>" first (with a specific "trailing uploader
   tag" peel-off rule — see the two regex comments, the space-before-hyphen
-  distinction is load-bearing, don't simplify it away), then a bare
-  number/range as the *entire* filename stem (e.g. "1114" or "5-6", using
-  the range's start). Returns `None`, not a guess, when neither matches —
-  `process_audiobook_file` only then falls back to
+  distinction is load-bearing, don't simplify it away), then a trailing
+  bare number/range that's either the whole filename stem or preceded by
+  whitespace (e.g. "1114", "5-6", or "Shadow Slave 1751-1846" — a title
+  prefix before a bundled range — using the range's start). A
+  non-whitespace-joined digit run (e.g. "12345_67890") deliberately does
+  NOT count as a trailing number. Returns `None`, not a guess, when
+  nothing matches — `process_audiobook_file` only then falls back to
   `infer_next_episode_number` (highest existing "Ep n" in the destination
   dir + 1). The Telegram message ID is *never* used as an episode number —
   it's an arbitrary ID shared across the whole chat, unrelated to the
@@ -289,7 +298,7 @@ typing** for Telethon objects rather than a mocking framework or live
 network calls (`FakeClient`, `FakeMessage`, `FakeDocumentAttribute`, etc. —
 see `tests/downloader/test_worker.py` for the fullest example). Real
 `StateStore` instances against `tmp_path` SQLite files, not mocked. This
-kept the whole suite at ~2-3 seconds for 146 tests with zero flakiness from
+kept the whole suite at ~2-3 seconds for 148 tests with zero flakiness from
 mocking mismatches. A C# port should use the equivalent (hand-written test
 doubles implementing the same interfaces, or `WTelegramClient`'s own
 test-friendly seams if it has them) over a heavy mocking framework, for the

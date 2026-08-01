@@ -122,10 +122,12 @@ newest-first, and scanning stops for a channel once a message older than
 **`audiobook_mode` channels** are post-processed by
 `src/downloader/audiobook_processor.py` immediately after each chapter's
 atomic download completes: the episode number and subtitle are parsed from
-the filename — either "Ep &lt;n&gt; - &lt;subtitle&gt;", or a bare number/range like
-"1114" or "5-6" — never from the Telegram message ID. If the filename has
-no parsable number at all, the next episode number is inferred from the
-highest "Ep n" already in the destination directory, plus one. ID3/MP4 tags
+the filename — either "Ep &lt;n&gt; - &lt;subtitle&gt;", or a trailing bare number/range
+like "1114", "5-6", or "Shadow Slave 1751-1846" (a title prefix before a
+bundled range; a range uses its start number) — never from the Telegram
+message ID. If the filename has no parsable number at all, the next
+episode number is inferred from the highest "Ep n" already in the
+destination directory, plus one. ID3/MP4 tags
 (Artist, Album, Title, Track) are embedded via `mutagen`, and the file is
 moved — via `shutil.move`, safe across filesystem boundaries — into
 `{AUDIOBOOKS_DEST_DIR}/{author}/{novel_title}/`. `audiobook_mode: true`
@@ -259,9 +261,11 @@ Reprocess mode is fully offline (no Telegram connection): for every
 `audiobook_mode` channel, it scans `download_root/{output_subdir}` for
 files that were downloaded but never tagged and moved into
 `AUDIOBOOKS_DEST_DIR` (e.g. because `audiobook_mode` was turned on after
-they were downloaded), tags and relocates them, and corrects their
-`downloaded_files` state record. Safe to run repeatedly — once a file is
-moved out of staging there's nothing left for it to find.
+they were downloaded, or the files predate this app's state tracking
+entirely), tags and relocates them, and corrects their `downloaded_files`
+state record where one exists — files with no matching record are still
+tagged/moved, just with nothing to correct. Safe to run repeatedly — once
+a file is moved out of staging there's nothing left for it to find.
 
 Verify mode is online (one batched `get_messages` request per channel): for
 every `audiobook_mode` channel, it re-fetches each already-tagged file's
