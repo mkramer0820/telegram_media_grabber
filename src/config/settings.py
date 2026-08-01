@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -23,6 +23,17 @@ class MediaType(str, Enum):
     VIDEO = "video"
     DOCUMENT = "document"
     AUDIO = "audio"
+
+
+class AudiobookMetadata(BaseModel):
+    """Author/title metadata attached to an `audiobook_mode` channel.
+
+    Consumed by `src.downloader.audiobook_processor` to populate ID3/MP4
+    tags and to build the `{author}/{novel_title}/...` destination layout.
+    """
+
+    author: str = Field(..., description="Tagged as Artist/AlbumArtist.")
+    novel_title: str = Field(..., description="Tagged as Album; also the destination folder.")
 
 
 class ChannelConfig(BaseModel):
@@ -37,6 +48,23 @@ class ChannelConfig(BaseModel):
     min_date: str | None = Field(
         default=None, description="ISO-8601 date; skip messages older than this."
     )
+    audiobook_mode: bool = Field(
+        default=False,
+        description="If true, downloaded audio is tagged and relocated by audiobook_processor.",
+    )
+    metadata: AudiobookMetadata | None = Field(
+        default=None, description="Required when audiobook_mode is true."
+    )
+
+    @model_validator(mode="after")
+    def _require_metadata_when_audiobook_mode(self) -> "ChannelConfig":
+        """Fail config loading fast rather than silently skipping tagging later."""
+        if self.audiobook_mode and self.metadata is None:
+            raise ValueError(
+                f"Channel '{self.name}' has audiobook_mode=true but no `metadata` "
+                "(author/novel_title) block."
+            )
+        return self
 
 
 class ChannelsFile(BaseModel):
@@ -66,7 +94,7 @@ class Settings(BaseSettings):
     tg_api_hash: str = Field(..., description="Telegram API hash from my.telegram.org.")
     tg_phone: str = Field(..., description="Phone number used to log in to Telegram.")
     tg_session_name: str = Field(
-        default="session/downloader",
+        default="data/downloader",
         description="Path (without extension) to the Telethon .session file.",
     )
     channels_config_path: Path = Field(
@@ -74,12 +102,20 @@ class Settings(BaseSettings):
         description="Path to the YAML file declaring download targets.",
     )
     state_db_path: Path = Field(
-        default=Path("storage/state.db"),
+        default=Path("data/state.db"),
         description="Path to the SQLite database used for state tracking.",
     )
     log_file_path: Path = Field(
         default=Path("logs/app.log"),
         description="Path to the rotating backend log file.",
+    )
+    audiobooks_dest_dir: Path = Field(
+        default=Path("downloads/Audiobooks"),
+        description=(
+            "Destination root for audiobook_mode channels. Override via "
+            "AUDIOBOOKS_DEST_DIR to point at an external/NAS path, e.g. "
+            "P:\\Audiobooks or /mnt/plex/Audiobooks."
+        ),
     )
 
     channels_file: ChannelsFile = Field(default_factory=ChannelsFile, exclude=True)

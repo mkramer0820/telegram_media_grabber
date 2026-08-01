@@ -43,6 +43,7 @@ async def run(settings: Settings, console: Console) -> None:
                     state_store=state_store,
                     download_root=settings.channels_file.download_root,
                     max_concurrent_downloads=settings.channels_file.max_concurrent_downloads,
+                    audiobooks_dest_dir=settings.audiobooks_dest_dir,
                     reporter=dashboard,
                 )
                 await manager.run(settings.channels_file.channels)

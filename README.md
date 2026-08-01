@@ -58,7 +58,11 @@ engineering rules this codebase follows.
 TG_API_ID=123456
 TG_API_HASH=your_api_hash_here
 TG_PHONE=+15551234567
-TG_SESSION_NAME=session/downloader
+TG_SESSION_NAME=data/downloader
+
+# Destination root for audiobook_mode channels (see below). Defaults to
+# downloads/Audiobooks; override with an absolute external/NAS path.
+AUDIOBOOKS_DEST_DIR=downloads/Audiobooks
 ```
 
 ### `config/channels.yaml` (download targets)
@@ -76,12 +80,31 @@ channels:
     media_types: [document]
     output_subdir: docs
     min_date: "2024-01-01"
+  - id: -1001987654321
+    name: shadow_slave_audiobook
+    media_types: [document]
+    output_subdir: shadow_slave_staging
+    audiobook_mode: true
+    metadata:
+      author: "Guiltythree"
+      novel_title: "Shadow Slave"
 ```
 
 Settings are loaded and validated by `src/config/settings.py` using
 `pydantic-settings`: `.env` supplies secrets/runtime knobs, the YAML file
 supplies the channel list, and both are merged into one immutable `Settings`
 object at startup.
+
+**`audiobook_mode` channels** are post-processed by
+`src/downloader/audiobook_processor.py` immediately after each chapter's
+atomic download completes: the episode number and subtitle are parsed from
+the filename (falling back to the Telegram message ID), ID3/MP4 tags
+(Artist, Album, Title, Track) are embedded via `mutagen`, and the file is
+moved — via `shutil.move`, safe across filesystem boundaries — into
+`{AUDIOBOOKS_DEST_DIR}/{author}/{novel_title}/`. `audiobook_mode: true`
+requires a `metadata` block (`author` + `novel_title`); config loading fails
+fast if it's missing. Chapters are kept as individual files — there is no
+`ffmpeg` dependency or `.m4b` concatenation step.
 
 ---
 
@@ -95,8 +118,9 @@ telegram_media_grabber/
 ├── .env                       # Local secrets (gitignored)
 ├── config/
 │   └── channels.yaml           # Declarative list of channels/chats to grab
-├── session/
-│   └── downloader.session      # Telethon session file (gitignored)
+├── data/                       # Canonical home for all persistent local state (gitignored)
+│   ├── downloader.session      # Telethon session file
+│   └── state.db                # SQLite state database (message tracking + dedup)
 ├── logs/
 │   └── app.log                 # Rotating backend log (never printed to terminal)
 ├── downloads/                  # Default media output root (gitignored)
@@ -112,19 +136,20 @@ telegram_media_grabber/
 │   │   └── exceptions.py       # Domain-specific exception types
 │   ├── downloader/
 │   │   ├── __init__.py
-│   │   ├── worker.py           # Async download workers, semaphore-bounded
-│   │   ├── filenames.py        # Centralized filename sanitization
-│   │   └── dedup.py            # Dedup key computation / collision handling
+│   │   ├── worker.py                # Async download workers, semaphore-bounded
+│   │   ├── filenames.py             # Centralized filename sanitization
+│   │   ├── dedup.py                 # Dedup key computation / collision handling
+│   │   └── audiobook_processor.py   # audiobook_mode tagging + relocation
 │   ├── storage/
 │   │   ├── __init__.py
-│   │   ├── state.py            # SQLite schema + last-message-id tracking
-│   │   └── models.py           # Typed dataclasses/rows for state records
+│   │   └── state.py            # SQLite schema + last-message-id tracking
 │   └── ui/
 │       ├── __init__.py
 │       ├── dashboard.py        # rich Live dashboard (progress, throughput, logs)
 │       └── logging_config.py   # Rotating file handler setup (no stdout handler)
 └── tests/
     ├── config/
+    ├── core/
     ├── downloader/
     ├── storage/
     └── ui/
@@ -134,11 +159,18 @@ telegram_media_grabber/
 Nothing below `ui/` imports from it. `main.py` is the only place that
 constructs the event loop and wires all layers together.
 
+**Persistent state lives under `data/`.** The Telethon `.session` file
+(`TG_SESSION_NAME`, default `data/downloader`) and the SQLite state database
+(`state_db_path`, default `data/state.db`) both default into this single
+directory, so backing up or wiping "everything Telegram/local-state related"
+is always a matter of that one folder. `logs/` and `downloads/` remain
+separate since they aren't state Telethon/SQLite depend on to function.
+
 ---
 
 ## State Tracking (SQLite)
 
-A single SQLite database (`storage/state.db` by default) tracks, per chat:
+A single SQLite database (`data/state.db` by default) tracks, per chat:
 
 | column              | type    | meaning                                      |
 |---------------------|---------|-----------------------------------------------|
@@ -170,7 +202,7 @@ python -m src.main
 ```
 
 On first run you'll be prompted (via the `rich`-rendered UI) for the Telegram
-login code; after that, `session/downloader.session` keeps you logged in.
+login code; after that, `data/downloader.session` keeps you logged in.
 
 ---
 

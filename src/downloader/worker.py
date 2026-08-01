@@ -5,10 +5,14 @@ Implements:
     its final, sanitized name via `os.replace` once fully written
     (CLAUDE.md Section 2.1).
   - Bounded concurrency via `asyncio.Semaphore` (CLAUDE.md Section 4.4).
-  - `FloodWaitError` handling: the exact server-specified wait is always
-    honored (CLAUDE.md Section 4.6); an additional capped exponential
-    backoff is layered on top for *repeated* flood waits on the same task,
-    and for other transient network errors.
+  - `FloodWaitError` handling: always sleeps for exactly the server-specified
+    duration plus a fixed 2-second safety buffer (CLAUDE.md Section 4.6) —
+    never less, never a growing multiple that would drift away from what
+    Telegram actually asked for. Other transient network errors get a
+    separate, capped exponential backoff.
+  - Anti-ban pacing: a randomized human-like pause between consecutive
+    downloads on each worker slot, so the client doesn't hammer the API in
+    a mechanically regular pattern.
   - Clean cancellation: on `asyncio.CancelledError`, in-flight `.tmp` files
     are left in place (resumable) rather than renamed (CLAUDE.md Section 4.5).
 
@@ -31,6 +35,7 @@ from telethon.errors import FloodWaitError
 from telethon.tl.custom.message import Message
 
 from src.config.settings import ChannelConfig, MediaType
+from src.downloader.audiobook_processor import process_audiobook_file
 from src.downloader.dedup import hash_file
 from src.downloader.filenames import dedup_suffixed_path, sanitize_filename
 from src.storage.state import StateStore
@@ -40,6 +45,13 @@ logger = logging.getLogger(__name__)
 _MAX_TRANSIENT_RETRIES = 5
 _BASE_BACKOFF_SECONDS = 2.0
 _MAX_BACKOFF_SECONDS = 60.0
+_MAX_FLOOD_WAIT_RETRIES = 5
+_FLOOD_WAIT_BUFFER_SECONDS = 2.0
+
+# Anti-ban: a fixed, mechanically-regular gap between downloads is itself a
+# signature automation tools exhibit. Randomizing within a human-plausible
+# range avoids that pattern without meaningfully slowing throughput.
+_INTER_DOWNLOAD_DELAY_RANGE = (2.0, 5.0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,6 +154,7 @@ class DownloadManager:
         state_store: StateStore,
         download_root: Path,
         max_concurrent_downloads: int,
+        audiobooks_dest_dir: Path | None = None,
         reporter: ProgressReporter | None = None,
     ) -> None:
         """Initialize the manager.
@@ -152,12 +165,16 @@ class DownloadManager:
             download_root: Base directory under which channel subdirs live.
             max_concurrent_downloads: Upper bound on simultaneous file
                 downloads across all channels (CLAUDE.md Section 4.4).
+            audiobooks_dest_dir: Destination root for `audiobook_mode`
+                channels (`Settings.audiobooks_dest_dir`). Defaults to
+                `download_root / "Audiobooks"` if not supplied.
             reporter: Optional progress callback surface (e.g. the `rich`
                 dashboard). Defaults to a no-op implementation.
         """
         self._client = client
         self._state_store = state_store
         self._download_root = download_root
+        self._audiobooks_dest_dir = audiobooks_dest_dir or (download_root / "Audiobooks")
         self._semaphore = asyncio.Semaphore(max_concurrent_downloads)
         self._reporter: ProgressReporter = reporter or _NullProgressReporter()
 
@@ -196,7 +213,7 @@ class DownloadManager:
             if await self._state_store.is_downloaded(chat_id, message.id):
                 continue
 
-            tasks.append(self._download_one(channel.name, chat_id, message, output_dir))
+            tasks.append(self._download_one(channel, chat_id, message, output_dir))
             downloaded += 1
 
             self._reporter.on_channel_progress(
@@ -214,16 +231,19 @@ class DownloadManager:
         )
 
     async def _download_one(
-        self, chat_name: str, chat_id: int, message: Message, output_dir: Path
+        self, channel: ChannelConfig, chat_id: int, message: Message, output_dir: Path
     ) -> None:
         """Download a single message's media under the shared semaphore.
 
         Args:
-            chat_name: Human-readable channel label, for reporting.
+            channel: The channel/chat configuration this message belongs to
+                (provides `name` for reporting and, for `audiobook_mode`
+                channels, the tagging metadata).
             chat_id: Numeric Telegram chat ID.
             message: The message whose media should be downloaded.
             output_dir: Directory the final file should land in.
         """
+        chat_name = channel.name
         async with self._semaphore:
             raw_name = _derive_filename(message)
             safe_name = sanitize_filename(raw_name)
@@ -247,23 +267,41 @@ class DownloadManager:
                 )
                 tmp_path.unlink(missing_ok=True)
                 self._reporter.on_file_error(chat_name, message.id, str(exc))
-                return
+            else:
+                if channel.audiobook_mode and channel.metadata is not None:
+                    try:
+                        final_path = await process_audiobook_file(
+                            final_path, message.id, channel.metadata, self._audiobooks_dest_dir
+                        )
+                    except Exception:  # noqa: BLE001 - boundary: don't lose an already-downloaded file
+                        logger.exception(
+                            "Audiobook post-processing failed for chat=%s message=%s; "
+                            "keeping file at %s untagged/unmoved.",
+                            chat_id, message.id, final_path,
+                        )
 
-            content_hash = await asyncio.to_thread(hash_file, final_path)
-            await self._state_store.record_downloaded_file(
-                chat_id, message.id, final_path, content_hash
-            )
-            self._reporter.on_file_complete(chat_name, message.id, final_path)
+                content_hash = await asyncio.to_thread(hash_file, final_path)
+                await self._state_store.record_downloaded_file(
+                    chat_id, message.id, final_path, content_hash
+                )
+                self._reporter.on_file_complete(chat_name, message.id, final_path)
+
+            # Anti-ban pacing: space out consecutive downloads on this
+            # worker slot with a randomized, human-plausible delay. Skipped
+            # entirely on cancellation (handled above via re-raise) so
+            # shutdown isn't held up.
+            await asyncio.sleep(random.uniform(*_INTER_DOWNLOAD_DELAY_RANGE))
 
     async def _download_with_retries(
         self, chat_name: str, message: Message, tmp_path: Path
     ) -> None:
         """Download `message`'s media to `tmp_path`, retrying transient errors.
 
-        `FloodWaitError` always sleeps for at least the server-specified
-        duration. Repeated flood waits (and other transient network errors)
-        additionally back off exponentially, capped at `_MAX_BACKOFF_SECONDS`,
-        up to `_MAX_TRANSIENT_RETRIES` attempts.
+        `FloodWaitError` always sleeps for exactly the server-specified
+        duration plus a fixed `_FLOOD_WAIT_BUFFER_SECONDS` safety margin —
+        never a growing multiple, so the wait always matches what Telegram
+        actually asked for (CLAUDE.md Section 4.6). Other transient network
+        errors get a separate capped exponential backoff.
 
         Args:
             chat_name: Human-readable channel label, for progress reporting.
@@ -273,7 +311,8 @@ class DownloadManager:
         Raises:
             Exception: Re-raises the last error once retries are exhausted.
         """
-        attempt = 0
+        flood_attempt = 0
+        transient_attempt = 0
         while True:
             try:
 
@@ -285,30 +324,33 @@ class DownloadManager:
                 await message.download_media(file=str(tmp_path), progress_callback=_progress)
                 return
             except FloodWaitError as exc:
-                attempt += 1
-                backoff = min(_BASE_BACKOFF_SECONDS * (2 ** (attempt - 1)), _MAX_BACKOFF_SECONDS)
-                wait_seconds = float(exc.seconds) + backoff
+                flood_attempt += 1
+                wait_seconds = float(exc.seconds) + _FLOOD_WAIT_BUFFER_SECONDS
                 logger.warning(
-                    "FloodWaitError on chat message=%s: sleeping %.1fs "
-                    "(server=%ss + backoff=%.1fs, attempt %d)",
-                    message.id, wait_seconds, exc.seconds, backoff, attempt,
+                    "FloodWaitError on message=%s: sleeping %.1fs "
+                    "(server=%ss + %.1fs buffer, attempt %d/%d)",
+                    message.id, wait_seconds, exc.seconds,
+                    _FLOOD_WAIT_BUFFER_SECONDS, flood_attempt, _MAX_FLOOD_WAIT_RETRIES,
                 )
                 self._reporter.on_flood_wait(wait_seconds)
+                # The sleep always runs in full, uninterrupted by our own
+                # retry budget — only the *decision to try again afterward*
+                # is capped. The loop and event loop are never dropped.
                 await asyncio.sleep(wait_seconds)
-                if attempt >= _MAX_TRANSIENT_RETRIES:
+                if flood_attempt >= _MAX_FLOOD_WAIT_RETRIES:
                     raise
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 - transient network/IO error
-                attempt += 1
-                if attempt >= _MAX_TRANSIENT_RETRIES:
+                transient_attempt += 1
+                if transient_attempt >= _MAX_TRANSIENT_RETRIES:
                     raise
                 backoff = min(
-                    _BASE_BACKOFF_SECONDS * (2 ** (attempt - 1)), _MAX_BACKOFF_SECONDS
+                    _BASE_BACKOFF_SECONDS * (2 ** (transient_attempt - 1)), _MAX_BACKOFF_SECONDS
                 ) + random.uniform(0, 1)
                 logger.warning(
                     "Transient error downloading message=%s (attempt %d/%d): %s; "
                     "retrying in %.1fs",
-                    message.id, attempt, _MAX_TRANSIENT_RETRIES, exc, backoff,
+                    message.id, transient_attempt, _MAX_TRANSIENT_RETRIES, exc, backoff,
                 )
                 await asyncio.sleep(backoff)

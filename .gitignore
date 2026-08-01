@@ -1,8 +1,7 @@
 .env
-session/
+data/
 logs/
 downloads/
-storage/*.db
 __pycache__/
 *.pyc
 .mypy_cache/

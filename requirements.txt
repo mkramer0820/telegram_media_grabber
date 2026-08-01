@@ -4,3 +4,4 @@ rich>=13.7.0
 pydantic>=2.7.0
 pydantic-settings>=2.2.1
 PyYAML>=6.0.1
+mutagen>=1.47.0

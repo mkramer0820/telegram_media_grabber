@@ -9,6 +9,7 @@ subsequent run connects without prompting for a login code.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from rich.console import Console
 from telethon import TelegramClient
@@ -26,12 +27,22 @@ try:
 except ImportError:  # pragma: no cover - environment-dependent
     _CRYPTG_AVAILABLE = False
 
+# Anti-ban: identify as a real, common Telegram Desktop install rather than
+# Telethon's default generic signature. A device fingerprint that never
+# changes across runs (fixed values, not randomized per-session) looks like
+# a normal returning user to Telegram's abuse heuristics; a client that
+# reports no device info, or a different one every run, reads as automation.
+_DEVICE_MODEL = "Desktop"
+_SYSTEM_VERSION = "Windows 11"
+_APP_VERSION = "4.16.8 x64"
+_LANG_CODE = "en"
+
 
 def build_client(settings: Settings) -> TelegramClient:
     """Construct a `TelegramClient` configured from `settings`.
 
     The session file path comes from `settings.tg_session_name` (backed by
-    the `TG_SESSION_NAME` env var, default `session/downloader`). Telethon
+    the `TG_SESSION_NAME` env var, default `data/downloader`). Telethon
     stores this as `<tg_session_name>.session`; if that file already exists
     from a prior login, the returned client will reuse it and no fresh
     authentication is required.
@@ -52,8 +63,6 @@ def build_client(settings: Settings) -> TelegramClient:
     # Ensure the parent directory of the session file exists so Telethon can
     # create/read it regardless of where TG_SESSION_NAME points (e.g. a
     # pre-existing `data/downloader.session` from a prior deployment).
-    from pathlib import Path
-
     Path(session_path).parent.mkdir(parents=True, exist_ok=True)
 
     if _CRYPTG_AVAILABLE:
@@ -72,6 +81,10 @@ def build_client(settings: Settings) -> TelegramClient:
         retry_delay=1,
         auto_reconnect=True,
         flood_sleep_threshold=0,  # handled explicitly by downloader workers
+        device_model=_DEVICE_MODEL,
+        system_version=_SYSTEM_VERSION,
+        app_version=_APP_VERSION,
+        lang_code=_LANG_CODE,
     )
     return client
 
