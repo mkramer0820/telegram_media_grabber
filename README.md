@@ -8,6 +8,10 @@ Rebuilt from scratch — domain-driven layout, async workers, persistent SQLite
 state, and a live terminal dashboard. See `CLAUDE.md` for the non-negotiable
 engineering rules this codebase follows.
 
+A C# rewrite is planned for a lighter-weight distributable. See
+`PROJECT_STATE.md` (what this app does) and `CSHARP_PORT_GUIDE.md` (how to
+build the C# version) if you're picking that up.
+
 ---
 
 ## Features

@@ -6,8 +6,14 @@ next-game-plan, for a lighter-weight distributable) can reproduce the same
 behavior without re-deriving it from scratch. This is documentation only —
 no porting work has started.
 
-Last updated: 2026-08-01. Verify against the code before relying on any
+Last updated: 2026-08-02. Verify against the code before relying on any
 claim here — this file describes a point in time, not a live contract.
+
+**Companion document**: `CSHARP_PORT_GUIDE.md` is the actionable
+instruction set for actually starting the C# rewrite (architecture, DI,
+persistence, testing, distribution, plus the metadata-overrides feature
+design) — this file is "what the Python app does," that one is "how to
+build the C# version." Read this file first, then that one.
 
 ---
 
